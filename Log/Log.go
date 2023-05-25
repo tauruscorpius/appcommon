@@ -4,6 +4,7 @@ import (
 	"github.com/tauruscorpius/logrus"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -78,7 +79,7 @@ func Init() {
 	formatter := &logrus.TextFormatter{
 		FullTimestamp: true,
 		CallerPrettyfier: func(r *runtime.Frame) (function string, file string) {
-			return trim(r.Function, '/'), trim(r.File, '/')
+			return trim(r.Function, '/'), trim(r.File, '/') + ":" + strconv.Itoa(r.Line)
 		}}
 	l.SetFormatter(formatter)
 	l.SetLevel(logrus.TraceLevel)
