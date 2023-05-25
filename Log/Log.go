@@ -3,6 +3,8 @@ package Log
 import (
 	"github.com/tauruscorpius/logrus"
 	"os"
+	"runtime"
+	"strings"
 )
 
 var l = logrus.New()
@@ -66,7 +68,19 @@ func init() {
 
 func Init() {
 	l.SetReportCaller(true)
-	l.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
+	trim := func(in string, delimiter byte) string {
+		loc := strings.LastIndexByte(in, delimiter)
+		if loc < 0 {
+			return in
+		}
+		return in[loc+1:]
+	}
+	formatter := &logrus.TextFormatter{
+		FullTimestamp: true,
+		CallerPrettyfier: func(r *runtime.Frame) (function string, file string) {
+			return trim(r.Function, '/'), trim(r.File, '/')
+		}}
+	l.SetFormatter(formatter)
 	l.SetLevel(logrus.TraceLevel)
 	l.SetOutput(os.Stdout)
 	go ArchiveLogFiles()
