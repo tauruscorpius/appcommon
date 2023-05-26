@@ -27,7 +27,7 @@ func BootInit(nodeType LookupConsts.ServiceNodeType) bool {
 		return false
 	}
 
-	Log.SetOutput("node." + string(nodeType) + "." + lookUpArgs.Identifier + "_")
+	Log.SetOutput(string(nodeType) + "." + lookUpArgs.Identifier + "_")
 
 	// Max P
 	Log.Criticalf("Number of cpu num[%v] \n", runtime.NumCPU())
