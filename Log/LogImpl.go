@@ -1,6 +1,7 @@
 package Log
 
 import (
+	"fmt"
 	"github.com/tauruscorpius/appcommon/Consts"
 	"os"
 	"strconv"
@@ -24,20 +25,34 @@ func LogCreator(logKey string) {
 	logMutex.Lock()
 	defer logMutex.Unlock()
 	logHome := os.Getenv("HOME") + "/log"
-	os.MkdirAll(logHome, 0777)
+	_ = os.MkdirAll(logHome, 0777)
 	timeNow := time.Now()
+	newFile := func(f string) *os.File {
+		fh, err := os.OpenFile(f, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if err != nil {
+			fmt.Printf("Create Log File %s Error : %v, Use Stdout innstead of\n", f, err)
+			return os.Stdout
+		}
+		return fh
+	}
 	fileName := logHome + "/" + logKey + timeNow.Format(Consts.DateDF) + logPathDelimiter + "log"
-	fileNew, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	var closeLog *os.File = nil
+	st, err := os.Stat(fileName)
 	if err != nil {
-		return
+		closeLog = fileLog
+		fileLog = nil
+	} else if st.IsDir() {
+		fmt.Printf("Log File Conflict with Dir Name : %s\n", fileName)
 	}
-	oldFileLog := fileLog
-	if oldFileLog != nil {
-		oldFileLog.Close()
+	if fileLog == nil {
+		fh := newFile(fileName)
+		l.SetOutput(fh)
+		fileLog = fh
 	}
-	l.SetOutput(fileNew)
-
-	fileLog = fileNew
+	if closeLog != nil {
+		_ = closeLog.Close()
+		closeLog = nil
+	}
 }
 
 func SetOutput(logBaseName string) {

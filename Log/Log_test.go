@@ -1,7 +1,15 @@
 package Log
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestLogOut(t *testing.T) {
-	Criticalf("test")
+	SetOutput("test_LogOut")
+	time.Sleep(time.Second * 2)
+	for i := 0; i < 10; i++ {
+		Criticalf("test")
+		time.Sleep(time.Second)
+	}
 }
