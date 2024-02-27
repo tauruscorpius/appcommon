@@ -4,6 +4,7 @@ import (
 	"github.com/tauruscorpius/appcommon/Log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -31,10 +32,17 @@ func (t *AppService) MergeMapping(m []PathMapping) {
 	t.mapping = append(t.mapping, m...)
 }
 
-func (t *AppService) StartHttpApi(listenAddress string) {
+func (t *AppService) StartHttpApi(listenAddress string, addrAny bool) {
 	muxInstance := createHttpMux(t.mapping)
-	Log.Criticalf("using h2 for http2, listen address [%s]\n", listenAddress)
+	Log.Criticalf("using h2 for http2, listen @ [%s]\n", listenAddress)
 	go func() {
+		if addrAny {
+			splitAddr := strings.Split(listenAddress, ":")
+			if len(splitAddr) >= 2 {
+				listenAddress = ":" + splitAddr[len(splitAddr)-1]
+				Log.Criticalf("listen any address bind @ [%s]\n", listenAddress)
+			}
+		}
 		_ = t.startServer(listenAddress, muxInstance)
 	}()
 }

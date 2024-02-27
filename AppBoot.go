@@ -71,7 +71,7 @@ func AppInit(svcMapping []ApiService.PathMapping) bool {
 	ApiService.GetAppService().MergeMapping(svcMapping)
 
 	lookUpArs := LookupArgs.GetLookupAppArgs()
-	ApiService.GetAppService().StartHttpApi(lookUpArs.ServerHost)
+	ApiService.GetAppService().StartHttpApi(lookUpArs.ServerHost, lookUpArs.BindAddrAny)
 
 	// register nodes
 	lookUpDs := lookUpClient.GetDataStore()

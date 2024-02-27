@@ -12,10 +12,11 @@ import (
 )
 
 type LookupAppArgs struct {
-	ServerHost string
-	Identifier string
-	NodeLookup []string
-	NodeType   LookupConsts.ServiceNodeType
+	ServerHost  string
+	Identifier  string
+	BindAddrAny bool
+	NodeLookup  []string
+	NodeType    LookupConsts.ServiceNodeType
 }
 
 var (
@@ -24,12 +25,15 @@ var (
 )
 
 func hostCheck(in string) error {
-	host, _, err := net.SplitHostPort(in)
+	host, port, err := net.SplitHostPort(in)
 	if err != nil {
 		return err
 	}
 	if host == "0.0.0.0" || host == "" {
-		return errors.New("any addr disabled")
+		return errors.New("expose address / any addr disabled")
+	}
+	if port == "" {
+		return errors.New("expose address / miss port")
 	}
 	return nil
 }
@@ -43,8 +47,10 @@ func GetLookupAppArgs() *LookupAppArgs {
 
 func (t *LookupAppArgs) ProcessAppArgs() bool {
 	var lookUpHost string
+	var addressAny bool
 	flag.StringVar(&t.ServerHost, "host", "", "local bind host")
 	flag.StringVar(&lookUpHost, "Lookup", "", "Lookup host")
+	flag.BoolVar(&addressAny, "any", false, "bind address any")
 	flag.Parse()
 
 	// host
@@ -77,6 +83,7 @@ func (t *LookupAppArgs) ProcessAppArgs() bool {
 		Log.Errorf("error nil Lookup nodes\n")
 		return false
 	}
+	t.BindAddrAny = addressAny
 	return true
 }
 
