@@ -1,6 +1,7 @@
 package ApiService
 
 import (
+	"crypto/tls"
 	"github.com/tauruscorpius/appcommon/Log"
 	"net/http"
 	"os"
@@ -51,6 +52,9 @@ func (t *AppService) startServer(listenAddress string, mux http.Handler) error {
 	server := &http.Server{
 		Addr:    listenAddress,
 		Handler: mux,
+		TLSConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
 	}
 	homeDir := os.Getenv("HOME")
 	certKey := homeDir + string(os.PathSeparator) + "/etc/pem/server.key"
