@@ -21,14 +21,19 @@ func GetRedisBase() *RedisClusterBase {
 	return redisBase
 }
 
-type RedisClusterPool struct {
+type RedisClusterConfig struct {
 	redisUser     string
 	redisPassword string
 	pool          []string
 }
 
-func (t *RedisClusterPool) Add(host, port string) {
+func (t *RedisClusterConfig) Add(host, port string) {
 	t.pool = append(t.pool, host+":"+port)
+}
+
+func (t *RedisClusterConfig) SetAuth(user, password string) {
+	t.redisUser = user
+	t.redisPassword = password
 }
 
 type RedisClusterBase struct {
@@ -39,7 +44,7 @@ func (t RedisClusterBase) Get() *redis.ClusterClient {
 	return t.cluster
 }
 
-func (t *RedisClusterBase) ClusterInit(redisPool *RedisClusterPool) error {
+func (t *RedisClusterBase) ClusterInit(redisPool *RedisClusterConfig) error {
 	if redisPool == nil {
 		t.cluster = nil
 		return nil
@@ -56,9 +61,7 @@ func (t *RedisClusterBase) ClusterInit(redisPool *RedisClusterPool) error {
 		IdleCheckFrequency: 1 * time.Second,
 	}
 	if redisPool.redisPassword != "" {
-		if redisPool.redisUser != "" {
-			option.Username = redisPool.redisUser
-		}
+		option.Username = redisPool.redisUser
 		option.Password = redisPool.redisPassword
 	}
 	cluster := redis.NewClusterClient(option)
