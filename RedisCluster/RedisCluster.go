@@ -59,7 +59,6 @@ func (t *RedisClusterBase) ClusterInit(redisPool *RedisClusterPool) error {
 		if redisPool.redisUser != "" {
 			option.Username = redisPool.redisUser
 		}
-		option.Username = redisPool.redisUser
 		option.Password = redisPool.redisPassword
 	}
 	cluster := redis.NewClusterClient(option)
