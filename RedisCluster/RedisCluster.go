@@ -22,7 +22,9 @@ func GetRedisBase() *RedisClusterBase {
 }
 
 type RedisClusterPool struct {
-	pool []string
+	redisUser     string
+	redisPassword string
+	pool          []string
 }
 
 func (t *RedisClusterPool) Add(host, port string) {
@@ -43,17 +45,24 @@ func (t *RedisClusterBase) ClusterInit(redisPool *RedisClusterPool) error {
 		return nil
 	}
 	Log.Criticalf("Redis Pool : %+v", *redisPool)
-	cluster := redis.NewClusterClient(
-		&redis.ClusterOptions{
-			Addrs:              redisPool.pool,
-			DialTimeout:        5 * time.Second,
-			ReadTimeout:        1 * time.Second,
-			WriteTimeout:       1 * time.Second,
-			PoolSize:           500,
-			PoolTimeout:        30 * time.Second,
-			IdleTimeout:        time.Minute,
-			IdleCheckFrequency: 1 * time.Second,
-		})
+	option := &redis.ClusterOptions{
+		Addrs:              redisPool.pool,
+		DialTimeout:        5 * time.Second,
+		ReadTimeout:        1 * time.Second,
+		WriteTimeout:       1 * time.Second,
+		PoolSize:           500,
+		PoolTimeout:        30 * time.Second,
+		IdleTimeout:        time.Minute,
+		IdleCheckFrequency: 1 * time.Second,
+	}
+	if redisPool.redisPassword != "" {
+		if redisPool.redisUser != "" {
+			option.Username = redisPool.redisUser
+		}
+		option.Username = redisPool.redisUser
+		option.Password = redisPool.redisPassword
+	}
+	cluster := redis.NewClusterClient(option)
 	if cluster == nil {
 		return errors.New("cluster new")
 	}
