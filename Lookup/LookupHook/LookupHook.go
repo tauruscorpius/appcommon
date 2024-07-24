@@ -28,6 +28,7 @@ func GetEventRequest() *EventRequestHook {
 }
 
 type EventRequestHook struct {
+	rw       sync.RWMutex
 	hookFunc map[string][]func(args []string) bool
 }
 
@@ -37,9 +38,12 @@ func (t *EventRequestHook) Init() bool {
 }
 
 func (t *EventRequestHook) RegisterHook(oid string, f func(args []string) bool) {
-	d, o := t.hookFunc[oid]
+	t.rw.Lock()
+	defer t.rw.Unlock()
+
+	_, o := t.hookFunc[oid]
 	if o {
-		d = append(d, f)
+		t.hookFunc[oid] = append(t.hookFunc[oid], f)
 		return
 	}
 	t.hookFunc[oid] = []func(args []string) bool{f}
