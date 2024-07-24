@@ -28,22 +28,34 @@ func GetEventRequest() *EventRequestHook {
 }
 
 type EventRequestHook struct {
-	hookFunc map[string]func(args []string) bool
+	hookFunc map[string][]func(args []string) bool
 }
 
 func (t *EventRequestHook) Init() bool {
-	t.hookFunc = make(map[string]func(args []string) bool)
+	t.hookFunc = make(map[string][]func(args []string) bool)
 	return true
 }
 
 func (t *EventRequestHook) RegisterHook(oid string, f func(args []string) bool) {
-	t.hookFunc[oid] = f
+	d, o := t.hookFunc[oid]
+	if o {
+		d = append(d, f)
+		return
+	}
+	t.hookFunc[oid] = []func(args []string) bool{f}
 }
 
 func (t *EventRequestHook) EventRequest(eventId string, eventArgs []string) bool {
 	fn, exist := t.hookFunc[eventId]
 	if exist {
-		return fn(eventArgs)
+		r := true
+		Log.Criticalf("Event Id [%s] has %d hook(s)\n", eventId, len(fn))
+		for i, v := range fn {
+			e := v(eventArgs)
+			Log.Criticalf("Event Id [%s] exec %d hook; result : %v\n", eventId, i+1, e)
+			r = r && e
+		}
+		return r
 	}
 	Log.Criticalf("Sys Event Id [%s] take no action\n", eventId)
 	return false

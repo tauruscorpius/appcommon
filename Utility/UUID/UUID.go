@@ -61,3 +61,11 @@ func GetUid() string {
 func GetUniqLexId() (string, error) {
 	return _ulid()
 }
+
+func GetTimeStampFromId(uid string) (time.Time, error) {
+	x, err := ulid.Parse(uid)
+	if err != nil {
+		return time.Now(), err
+	}
+	return ulid.Time(x.Time()), nil
+}
