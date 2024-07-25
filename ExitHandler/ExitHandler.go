@@ -2,10 +2,12 @@ package ExitHandler
 
 import (
 	"context"
+	"fmt"
 	"github.com/tauruscorpius/appcommon/Log"
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -13,25 +15,49 @@ import (
 type SystemStatus int
 
 const (
-	SystemInRunning = iota
+	SystemInRunning SystemStatus = iota
 	SystemExiting
+	SystemAtExitFunc
+	SystemOutExitFunc
 	SystemExited
 )
 
+func (t SystemStatus) String() string {
+	switch t {
+	case SystemInRunning:
+		return "SystemInRunning"
+	case SystemExiting:
+		return "SystemExiting"
+	case SystemAtExitFunc:
+		return "SystemAtExitFunc"
+	case SystemOutExitFunc:
+		return "SystemOutExitFunc"
+	case SystemExited:
+		return "SystemExited"
+	default:
+		return "SystemStatus Unknown"
+	}
+}
+
 type ExitProcHandler struct {
 	rw         sync.RWMutex
-	Status     SystemStatus
+	Status     atomic.Pointer[SystemStatus]
 	AppContext context.Context
 	ExitFunc   func()
 	handler    []func() bool
 }
 
 func (t *ExitProcHandler) Init() {
-	t.Status = SystemInRunning
+	t.SetStatus(SystemInRunning)
 	t.AppContext, t.ExitFunc = context.WithCancel(context.Background())
 }
 
+func (t *ExitProcHandler) GetSystemStatus() SystemStatus {
+	return *t.Status.Load()
+}
+
 func (t *ExitProcHandler) SetExitFlag() {
+	t.SetStatus(SystemExiting)
 	t.ExitFunc()
 }
 
@@ -42,17 +68,30 @@ func (t *ExitProcHandler) Add(a func() bool) {
 	t.handler = append(t.handler, a)
 }
 
+func (t *ExitProcHandler) SetStatus(s SystemStatus) {
+	old := t.Status.Swap(&s)
+	var str string
+	if old != nil {
+		str = fmt.Sprintf("%v", *old)
+	} else {
+		str = "nil"
+	}
+	fmt.Fprintf(os.Stdout, "%s System Status Change : %s -> %v\n", time.Now().String(), str, s)
+
+}
+
 func (t *ExitProcHandler) Execute(op chan bool) {
 	t.rw.Lock()
 	defer t.rw.Unlock()
 
-	t.Status = SystemExiting
+	t.SetStatus(SystemAtExitFunc)
 
 	for _, v := range t.handler {
 		v()
 	}
 
-	t.Status = SystemExited
+	t.SetStatus(SystemOutExitFunc)
+
 	op <- true
 	return
 }
@@ -102,6 +141,7 @@ func sigCallback(sigs chan os.Signal) {
 			Log.Criticalf("Execute Exit Fun Chain List Result : %v\n", m)
 		}
 		Log.CloseOutput()
+		GetExitFuncChain().SetStatus(SystemExited)
 		os.Exit(0)
 	}()
 }

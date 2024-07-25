@@ -2,6 +2,7 @@ package ApiService
 
 import (
 	"crypto/tls"
+	"github.com/tauruscorpius/appcommon/ExitHandler"
 	"github.com/tauruscorpius/appcommon/Log"
 	"net/http"
 	"os"
@@ -34,7 +35,11 @@ func (t *AppService) MergeMapping(m []PathMapping) {
 }
 
 func (t *AppService) StartHttpApi(listenAddress string, addrAny bool) {
-	muxInstance := createHttpMux(t.mapping)
+	running := func() bool {
+		// system running
+		return ExitHandler.GetExitFuncChain().GetSystemStatus() == ExitHandler.SystemInRunning
+	}
+	muxInstance := createHttpMux(t.mapping, running)
 	Log.Criticalf("using h2 for http2, listen @ [%s]\n", listenAddress)
 	go func() {
 		if addrAny {
