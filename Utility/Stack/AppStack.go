@@ -31,7 +31,7 @@ func DumpAppStack(app string, exit bool) error {
 	sz := runtime.Stack(stackInfo, true)
 	Log.Criticalf("dump stack , stack size : %d\n", sz)
 	if sz >= 0 && sz <= len(stackInfo) {
-		dumpStackDir := os.Getenv("HOME") + string(os.PathSeparator) + "log"
+		dumpStackDir := os.Getenv("HOME") + string(os.PathSeparator) + "log" + string(os.PathSeparator) + "stack"
 		os.MkdirAll(dumpStackDir, os.FileMode(0755))
 		dumpFile := dumpStackDir + string(os.PathSeparator) + app + ".stack"
 		dumpData := fmt.Sprintf("\n==================================\n"+

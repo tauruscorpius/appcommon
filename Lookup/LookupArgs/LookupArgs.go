@@ -7,12 +7,14 @@ import (
 	"github.com/tauruscorpius/appcommon/Lookup/LookupConsts"
 	"net"
 	"os"
+	"path"
 	"strings"
 	"sync"
 )
 
 type LookupAppArgs struct {
 	ServerHost  string
+	AppName     string
 	Identifier  string
 	BindAddrAny bool
 	NodeLookup  []string
@@ -58,6 +60,7 @@ func (t *LookupAppArgs) ProcessAppArgs() bool {
 		Log.Errorf("error host, error : %v\n", err)
 		return false
 	}
+	t.AppName = path.Base(os.Args[0])
 	t.Identifier = strings.ReplaceAll(t.ServerHost, ".", "")
 	t.Identifier = strings.ReplaceAll(t.Identifier, ":", "_")
 

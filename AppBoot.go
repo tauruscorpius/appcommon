@@ -64,7 +64,8 @@ func AppInit(svcMapping []ApiService.PathMapping) bool {
 	// dump app stack
 	lookupEvent.RegisterHook(string(LookupHook.NodeDumpAppStack),
 		func(args []string) bool {
-			app := LookupArgs.GetLookupAppArgs().Identifier
+			lookupArgs := LookupArgs.GetLookupAppArgs()
+			app := lookupArgs.AppName + "." + lookupArgs.Identifier
 			r := Stack.DumpAppStack(app, false)
 			Log.Criticalf("Dump App Stack result : %v\n", r)
 			return false
