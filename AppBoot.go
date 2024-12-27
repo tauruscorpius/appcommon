@@ -8,6 +8,7 @@ import (
 	"github.com/tauruscorpius/appcommon/Lookup/LookupConsts"
 	"github.com/tauruscorpius/appcommon/Lookup/LookupDS"
 	"github.com/tauruscorpius/appcommon/Lookup/LookupHook"
+	"github.com/tauruscorpius/appcommon/Utility/Stack"
 	"runtime"
 	"strconv"
 )
@@ -57,6 +58,15 @@ func AppInit(svcMapping []ApiService.PathMapping) bool {
 				return true
 			}
 			Log.Errorf("invalid set log level args [%+v]\n", args)
+			return false
+		})
+
+	// dump app stack
+	lookupEvent.RegisterHook(string(LookupHook.NodeDumpAppStack),
+		func(args []string) bool {
+			app := LookupArgs.GetLookupAppArgs().Identifier
+			r := Stack.DumpAppStack(app, false)
+			Log.Criticalf("Dump App Stack result : %v\n", r)
 			return false
 		})
 

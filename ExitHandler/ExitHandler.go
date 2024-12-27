@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"github.com/tauruscorpius/appcommon/Log"
+	"github.com/tauruscorpius/appcommon/Lookup/LookupArgs"
+	"github.com/tauruscorpius/appcommon/Utility/Stack"
 	"os"
 	"os/signal"
 	"sync"
@@ -141,6 +143,8 @@ func sigCallback(sigs chan os.Signal) {
 			Log.Criticalf("Execute Exit Fun Chain List Result : %v\n", m)
 		}
 		Log.CloseOutput()
+		app := LookupArgs.GetLookupAppArgs().Identifier
+		_ = Stack.DumpAppStack(app, true)
 		GetExitFuncChain().SetStatus(SystemExited)
 		os.Exit(0)
 	}()

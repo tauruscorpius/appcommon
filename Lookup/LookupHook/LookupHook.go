@@ -11,6 +11,7 @@ const (
 	NodeSetLogLevel   SysEventId = "setLogLevel"
 	NodeCacheRefresh  SysEventId = "cacheRefresh"
 	NodeUpdatedNotify SysEventId = "nodeUpdatedNotify"
+	NodeDumpAppStack  SysEventId = "dumpAppStack"
 )
 
 var (
