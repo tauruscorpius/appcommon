@@ -13,6 +13,7 @@ const (
 const (
 	DefaultHttpPingPath     = "/ping"
 	DefaultEventRequestPath = "/service-node/event-request"
+	DefaultPProfRequestPath = "/pprof"
 
 	// Lookup Nodes Provide register and query Path
 

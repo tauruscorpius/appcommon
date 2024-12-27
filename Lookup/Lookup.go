@@ -2,6 +2,7 @@ package Lookup
 
 import (
 	"errors"
+	"fmt"
 	"github.com/tauruscorpius/appcommon/ApiService"
 	"github.com/tauruscorpius/appcommon/Consts"
 	"github.com/tauruscorpius/appcommon/ExitHandler"
@@ -11,6 +12,7 @@ import (
 	"github.com/tauruscorpius/appcommon/Lookup/LookupConsts"
 	"github.com/tauruscorpius/appcommon/Lookup/LookupDS"
 	"github.com/tauruscorpius/appcommon/Lookup/RpcDS"
+	"github.com/tauruscorpius/appcommon/Utility/Perf"
 	"io"
 	"net/http"
 	"strings"
@@ -58,6 +60,7 @@ func (t *NodeLookupClient) CreateMuxForLookup() []ApiService.PathMapping {
 	var v = []ApiService.PathMapping{
 		{LookupConsts.DefaultHttpPingPath, t.CbMethodPing},
 		{LookupConsts.DefaultEventRequestPath, t.CbMethodServiceEvent},
+		{LookupConsts.DefaultPProfRequestPath, t.CbMethodPProf},
 	}
 	return v
 }
@@ -305,5 +308,44 @@ func (t *NodeLookupClient) CbMethodServiceEvent(w http.ResponseWriter, r *http.R
 		}
 	} else {
 		w.WriteHeader(http.StatusMethodNotAllowed)
+	}
+}
+
+func (t *NodeLookupClient) CbMethodPProf(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "GET" {
+		status := http.StatusOK
+		q := r.URL.Query()
+		command := q.Get("method")
+		result := "unknown command: " + command
+		if command == "start" {
+			addr := q.Get("addr")
+			er := Perf.StartPerfProfile(addr)
+			if er != nil {
+				result = fmt.Sprintf("start pprof @ %s failed, err : %v\n", addr, er)
+				Log.Error(result)
+				status = http.StatusInternalServerError
+			} else {
+				result = fmt.Sprintf("start pprof @ %s succeed\n", addr)
+				Log.Critical(result)
+			}
+		} else if command == "stop" {
+			er := Perf.StopPerfProfile()
+			if er != nil {
+				result = fmt.Sprintf("stop pprof failed, err : %v\n", er)
+				Log.Error(result)
+				status = http.StatusInternalServerError
+			} else {
+				result = fmt.Sprintf("stop pprof succeed\n")
+				Log.Critical(result)
+			}
+		} else if command == "check" {
+			result = Perf.CheckPerfProfile()
+		}
+		w.WriteHeader(status)
+		w.Write([]byte(result))
+	} else {
+		result := "POST method not allowed"
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte(result))
 	}
 }

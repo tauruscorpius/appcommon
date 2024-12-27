@@ -12,6 +12,8 @@ const (
 	NodeCacheRefresh  SysEventId = "cacheRefresh"
 	NodeUpdatedNotify SysEventId = "nodeUpdatedNotify"
 	NodeDumpAppStack  SysEventId = "dumpAppStack"
+	NodeStartPProf    SysEventId = "startPProf"
+	NodeStopPProf     SysEventId = "stopPProf"
 )
 
 var (
