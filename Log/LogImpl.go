@@ -117,6 +117,7 @@ func (b *BufferedLogWriter) Close() {
 	defer b.logMutex.Unlock()
 
 	if b.fileHandle != nil {
+		b.fileHandle.Sync()
 		b.fileHandle.Close()
 		b.fileHandle = nil
 	}
@@ -142,7 +143,6 @@ func (b *BufferedLogWriter) flush() {
 			fileHandle = os.Stdout
 		}
 		fileHandle.Write([]byte(s))
-		fileHandle.Sync()
 	}
 }
 
@@ -157,6 +157,7 @@ func (b *BufferedLogWriter) autoFlush() {
 		case <-b.chanFlush:
 			b.flush()
 		case <-b.chanClose:
+			b.Write([]byte("close log writer\n"))
 			b.flush()
 			b.Close()
 			return
