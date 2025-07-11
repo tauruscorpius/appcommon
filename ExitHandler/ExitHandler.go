@@ -41,6 +41,14 @@ func (t SystemStatus) String() string {
 	}
 }
 
+type UserExitSignal int
+
+func (t UserExitSignal) String() string {
+	return "UserExitSignal"
+}
+
+func (t UserExitSignal) Signal() {}
+
 type ExitProcHandler struct {
 	rw         sync.RWMutex
 	Status     atomic.Pointer[SystemStatus]
@@ -78,7 +86,7 @@ func (t *ExitProcHandler) SetStatus(s SystemStatus) {
 	} else {
 		str = "nil"
 	}
-	fmt.Fprintf(os.Stdout, "%s System Status Change : %s -> %v\n", time.Now().String(), str, s)
+	fmt.Printf("%s System Status Change : %s -> %v\n", time.Now().String(), str, s)
 
 }
 
@@ -101,6 +109,7 @@ func (t *ExitProcHandler) Execute(op chan bool) {
 var (
 	once         sync.Once
 	exitExecutor *ExitProcHandler
+	userExitFunc = func(code int) {}
 )
 
 func GetExitFuncChain() *ExitProcHandler {
@@ -116,29 +125,34 @@ func init() {
 
 func sigNotify() {
 	sigs := make(chan os.Signal, 1)
+	finished := make(chan bool)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	GetExitFuncChain().Init()
-	go sigCallback(sigs)
+	go sigCallback(sigs, finished)
 	signal.Ignore(syscall.SIGPIPE)
+	userExitFunc = func(code int) {
+		sigs <- syscall.SIGTERM //UserExitSignal(-1)
+		<-finished
+	}
 }
 
-func sigCallback(sigs chan os.Signal) {
+func sigCallback(sigs chan os.Signal, finished chan bool) {
 	go func() {
 		var op chan bool
 		op = make(chan bool)
 		sig := <-sigs
 		Log.Criticalf("Receive Signal: %s\n", sig)
-		_ = os.Stdout.Close()
-		GetExitFuncChain().SetExitFlag()
-		go GetExitFuncChain().Execute(op)
+		exitExecutor.SetExitFlag()
+		go exitExecutor.Execute(op)
 		start := time.Now()
 		wait := time.After(2 * time.Second)
 		select {
 		case <-wait:
 			Log.Errorf("Execute Exit Func Chain List Timeout, Exit System Right Now\n")
 		case m := <-op:
-			if time.Since(start).Seconds() < 1 {
-				time.Sleep(time.Second)
+			now := time.Now()
+			if now.Sub(start) < time.Second {
+				time.Sleep(time.Second - now.Sub(start))
 			}
 			Log.Criticalf("Execute Exit Fun Chain List Result : %v\n", m)
 		}
@@ -146,7 +160,19 @@ func sigCallback(sigs chan os.Signal) {
 		lookupArgs := LookupArgs.GetLookupAppArgs()
 		app := lookupArgs.AppName + "." + lookupArgs.Identifier
 		_ = Stack.DumpAppStack(app, true)
-		GetExitFuncChain().SetStatus(SystemExited)
-		os.Exit(0)
+		exitExecutor.SetStatus(SystemExited)
+		finished <- true
+		switch ty := sig.(type) {
+		case UserExitSignal:
+			fmt.Printf("exit with user signal %s\n", sig)
+			os.Exit(int(ty))
+		case os.Signal:
+			fmt.Printf("exit with signal %s\n", sig)
+			os.Exit(int(ty.(syscall.Signal)))
+		}
 	}()
+}
+
+func Exit(code int) {
+	userExitFunc(code)
 }

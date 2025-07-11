@@ -32,3 +32,10 @@ func TestExitProcHandler_GetSystemStatus2(t *testing.T) {
 		t.Error("Error SystemOutExitFunc Expected")
 	}
 }
+
+func TestExitProcHandler_AppExit(t *testing.T) {
+	GetExitFuncChain().Add(func() bool {
+		return true
+	})
+	Exit(2)
+}
