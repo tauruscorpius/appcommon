@@ -131,7 +131,7 @@ func sigNotify() {
 	go sigCallback(sigs, finished)
 	signal.Ignore(syscall.SIGPIPE)
 	userExitFunc = func(code int) {
-		sigs <- syscall.SIGTERM //UserExitSignal(-1)
+		sigs <- UserExitSignal(code)
 		<-finished
 	}
 }
