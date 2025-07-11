@@ -132,7 +132,15 @@ func sigNotify() {
 	signal.Ignore(syscall.SIGPIPE)
 	userExitFunc = func(code int) {
 		sigs <- UserExitSignal(code)
-		<-finished
+		wait := time.After(5 * time.Second)
+		select {
+		case <-wait:
+			fmt.Printf("Waiting exit finish signal timeout")
+		case <-finished:
+			fmt.Printf("Waiting exit finish completed")
+		}
+		time.Sleep(time.Second)
+		os.Exit(-1)
 	}
 }
 
@@ -164,10 +172,10 @@ func sigCallback(sigs chan os.Signal, finished chan bool) {
 		finished <- true
 		switch ty := sig.(type) {
 		case UserExitSignal:
-			fmt.Printf("exit with user signal %s\n", sig)
+			fmt.Printf("Exit with user exit signal %s\n", sig)
 			os.Exit(int(ty))
 		case os.Signal:
-			fmt.Printf("exit with signal %s\n", sig)
+			fmt.Printf("Exit with os signal %s\n", sig)
 			os.Exit(int(ty.(syscall.Signal)))
 		}
 	}()
