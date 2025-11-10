@@ -24,6 +24,29 @@ const (
 	NodeLookupRefreshQueueSize int = 1024
 )
 
+// ServiceLoadBalancer provides round-robin load balancing for service requests
+type ServiceLoadBalancer struct {
+	rw      sync.RWMutex
+	counter map[LookupConsts.ServiceNodeType]int
+}
+
+var serviceLoadBalancer ServiceLoadBalancer
+
+func init() {
+	serviceLoadBalancer.counter = make(map[LookupConsts.ServiceNodeType]int)
+}
+
+func (t *ServiceLoadBalancer) getNextIndex(svcType LookupConsts.ServiceNodeType, nodeCount int) int {
+	if nodeCount <= 0 {
+		return 0
+	}
+	t.rw.Lock()
+	defer t.rw.Unlock()
+	current := t.counter[svcType]
+	t.counter[svcType] = (current + 1) % nodeCount
+	return current % nodeCount
+}
+
 // NodeLookupClient a client of node Lookup
 type NodeLookupClient struct {
 	fetchLocker      sync.RWMutex
@@ -186,6 +209,27 @@ func (t *NodeLookupClient) SendServiceHttpRequest(sender, path string, targetSvc
 	return t.sendTargetNode(sender, path, x, targetSvcType, targetList, readBody)
 }
 
+// SendServiceHttpRequestToUid sends HTTP request to a specific node by UID
+// If targetUid is empty, it behaves like SendServiceHttpRequest with load balancing
+// If targetUid is specified, it only sends to that specific node
+func (t *NodeLookupClient) SendServiceHttpRequestToUid(sender, path string, targetSvcType LookupConsts.ServiceNodeType, targetUid string, x interface{}, readBody bool) (string, error) {
+	if targetUid == "" {
+		// No specific UID, use normal load balancing
+		return t.SendServiceHttpRequest(sender, path, targetSvcType, x, readBody)
+	}
+
+	// Filter by both service type and specific UID
+	targetList := t.ds.Nodes.SortWithFilter(
+		LookupDS.NodeQueryFilter{Include: []string{targetUid}},
+		LookupDS.NodeQueryFilter{Include: []string{string(targetSvcType)}})
+
+	if len(targetList) == 0 {
+		return "", errors.New("no target Service node found with uid " + targetUid + " and svcType " + string(targetSvcType))
+	}
+
+	return t.sendTargetNode(sender, path, x, targetSvcType, targetList, readBody)
+}
+
 func (t *NodeLookupClient) sendTargetNode(sender, path string, x interface{}, targetType LookupConsts.ServiceNodeType, targetList []LookupDS.RegisterNode, readBody bool) (string, error) {
 	if targetList == nil || len(targetList) == 0 {
 		return "", errors.New("no target Service node found svcType " + string(targetType))
@@ -195,9 +239,16 @@ func (t *NodeLookupClient) sendTargetNode(sender, path string, x interface{}, ta
 		Log.Errorf("httpRequest[%s]: object[%+v] marshal failed\n", sender, x)
 		return "", err
 	}
+	Log.Tracef("httpRequest[%s]: object[%+v] Request Body[%s]\n", sender, x, string(data))
 
-	for _, v := range targetList {
-		Log.Tracef("httpRequest[%s] -> remote[%v]: object[%+v] Request Body[%s]\n", sender, v, x, string(data))
+	// Try all nodes starting from load-balanced index
+	nodeCount := len(targetList)
+	startIdx := serviceLoadBalancer.getNextIndex(targetType, nodeCount)
+
+	for i := 0; i < nodeCount; i++ {
+		idx := (startIdx + i) % nodeCount
+		v := targetList[idx]
+		Log.Tracef("detail target nodes [%d/%d]: %+v\n", i+1, nodeCount, v)
 
 		url := v.JoinUrl(path)
 		statusCode, resp, err := HttpClient.PostHx(url, x, readBody)
@@ -209,7 +260,8 @@ func (t *NodeLookupClient) sendTargetNode(sender, path string, x interface{}, ta
 			Log.Tracef("httpRequest[%s] url[%s] succeed, object[%+v], status code %d\n", sender, url, x, statusCode)
 			return resp, nil
 		}
-		if !strings.HasPrefix(v.Uid, LookupConsts.StaticLookupNodeUidPrefix) {
+		// Only erase node if it's not a static lookup node and not the last attempt
+		if !strings.HasPrefix(v.Uid, LookupConsts.StaticLookupNodeUidPrefix) && i < nodeCount-1 {
 			nodeLookUpClient.ds.Erase(func(n *LookupDS.RegisterNode) bool {
 				if v.Uid == n.Uid {
 					Log.Criticalf("Erase Request failed - Node : %+v, url[%s]\n", n, url)
@@ -218,7 +270,6 @@ func (t *NodeLookupClient) sendTargetNode(sender, path string, x interface{}, ta
 				return false
 			})
 		}
-		break
 	}
 	return "", errors.New("error all request failed, svcType " + string(targetType))
 }
