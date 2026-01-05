@@ -32,6 +32,7 @@ type BufferedLogWriter struct {
 	chanFlush   chan struct{}
 	chanClose   chan struct{}
 	fileHandle  *os.File
+	flushForce  bool
 }
 
 func CreateBufferedLogWriter(logKey string) *BufferedLogWriter {
@@ -101,15 +102,19 @@ func (b *BufferedLogWriter) writeLogChan(ch chan struct{}) {
 func (b *BufferedLogWriter) Write(p []byte) (n int, err error) {
 	b.bufferMutex.Lock()
 	defer b.bufferMutex.Unlock()
-
-	if b.buffer.Len() >= MaxBufferedLogFileSize {
-		return 0, errors.New("buffer overflow")
+	if b.flushForce {
+		b.writeFile(p)
+		return len(p), nil
+	} else {
+		if b.buffer.Len() >= MaxBufferedLogFileSize {
+			return 0, errors.New("buffer overflow")
+		}
+		a, e := b.buffer.Write(p)
+		if b.buffer.Len() >= WriteLogFileSize || b.flushForce {
+			b.writeFlushChan()
+		}
+		return a, e
 	}
-	a, e := b.buffer.Write(p)
-	if b.buffer.Len() >= WriteLogFileSize {
-		b.writeFlushChan()
-	}
-	return a, e
 }
 
 func (b *BufferedLogWriter) Close() {
@@ -137,12 +142,23 @@ func (b *BufferedLogWriter) getBuffer() string {
 
 func (b *BufferedLogWriter) flush() {
 	s := b.getBuffer()
+	b.writeFile([]byte(s))
+}
+
+func (b *BufferedLogWriter) writeFile(s []byte) {
 	if len(s) > 0 {
 		fileHandle := b.fileHandle
 		if fileHandle == nil {
 			fileHandle = os.Stdout
 		}
-		fileHandle.Write([]byte(s))
+		fileHandle.Write(s)
+	}
+}
+
+func (b *BufferedLogWriter) forceFlush(flush bool) {
+	if flush != b.flushForce {
+		fmt.Printf("force flush flag change to : %v\n", flush)
+		b.flushForce = flush
 	}
 }
 
@@ -170,6 +186,7 @@ func SetOutput(logBaseName string) {
 	bufferLogWriter = CreateBufferedLogWriter(logKey)
 	bufferLogWriter.CheckLogFileRotation()
 	l.SetOutput(bufferLogWriter)
+	ForceFlush(true)
 	go bufferLogWriter.autoFlush()
 	go func() {
 		for {
@@ -181,6 +198,18 @@ func SetOutput(logBaseName string) {
 			time.Sleep(time.Second)
 		}
 	}()
+	go func() {
+		for {
+			time.Sleep(5 * time.Second)
+			ForceFlush(false)
+		}
+	}()
+}
+
+func ForceFlush(forceFlush bool) {
+	if bufferLogWriter != nil {
+		bufferLogWriter.forceFlush(forceFlush)
+	}
 }
 
 func CloseOutput() {
