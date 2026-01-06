@@ -107,9 +107,10 @@ func (t *ExitProcHandler) Execute(op chan bool) {
 }
 
 var (
-	once         sync.Once
-	exitExecutor *ExitProcHandler
-	userExitFunc = func(code int) {}
+	once            sync.Once
+	exitExecutor    *ExitProcHandler
+	userExitFunc    = func(code int) {}
+	exitProcessing  int32
 )
 
 func GetExitFuncChain() *ExitProcHandler {
@@ -125,33 +126,38 @@ func init() {
 
 func sigNotify() {
 	sigs := make(chan os.Signal, 1)
-	finished := make(chan bool)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 	GetExitFuncChain().Init()
-	go sigCallback(sigs, finished)
+	go sigCallback(sigs)
 	signal.Ignore(syscall.SIGPIPE)
 	userExitFunc = func(code int) {
 		sigs <- UserExitSignal(code)
-		wait := time.After(5 * time.Second)
-		select {
-		case <-wait:
-			fmt.Printf("Waiting exit finish signal timeout")
-		case <-finished:
-			fmt.Printf("Waiting exit finish completed")
-		}
-		time.Sleep(time.Second)
+		time.Sleep(5 * time.Second)
 		os.Exit(-1)
 	}
 }
 
-func sigCallback(sigs chan os.Signal, finished chan bool) {
+func sigCallback(sigs chan os.Signal) {
 	go func() {
-		var op chan bool
-		op = make(chan bool)
 		sig := <-sigs
+		
+		if !atomic.CompareAndSwapInt32(&exitProcessing, 0, 1) {
+			Log.Warnf("Exit already in progress, ignoring signal: %s\n", sig)
+			return
+		}
+		
 		Log.Criticalf("Receive Signal: %s\n", sig)
+		
+		if exitExecutor == nil {
+			Log.Errorf("exitExecutor is nil, cannot process exit gracefully\n")
+			os.Exit(-1)
+			return
+		}
+		
+		op := make(chan bool)
 		exitExecutor.SetExitFlag()
 		go exitExecutor.Execute(op)
+		
 		start := time.Now()
 		wait := time.After(2 * time.Second)
 		select {
@@ -164,19 +170,25 @@ func sigCallback(sigs chan os.Signal, finished chan bool) {
 			}
 			Log.Criticalf("Execute Exit Fun Chain List Result : %v\n", m)
 		}
+		
 		Log.CloseOutput()
 		lookupArgs := LookupArgs.GetLookupAppArgs()
 		app := lookupArgs.AppName + "." + lookupArgs.Identifier
 		_ = Stack.DumpAppStack(app, true)
 		exitExecutor.SetStatus(SystemExited)
-		finished <- true
+		
 		switch ty := sig.(type) {
 		case UserExitSignal:
 			fmt.Printf("Exit with user exit signal %s\n", sig)
 			os.Exit(int(ty))
 		case os.Signal:
 			fmt.Printf("Exit with os signal %s\n", sig)
-			os.Exit(int(ty.(syscall.Signal)))
+			if syscallSig, ok := ty.(syscall.Signal); ok {
+				os.Exit(int(syscallSig))
+			} else {
+				Log.Errorf("Unknown signal type, exiting with code 1\n")
+				os.Exit(1)
+			}
 		}
 	}()
 }
