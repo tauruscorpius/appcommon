@@ -3,12 +3,13 @@ package Log
 import (
 	"errors"
 	"fmt"
-	"github.com/tauruscorpius/appcommon/Consts"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tauruscorpius/appcommon/Consts"
 )
 
 const (
@@ -16,11 +17,11 @@ const (
 )
 
 var (
-	keepLogDays = 30
-	logKey      string
+	keepLogDays       = 30
+	logKey            string
+	bufferLogWriter   *BufferedLogWriter
+	bufferLogWriterMu sync.RWMutex
 )
-
-var bufferLogWriter *BufferedLogWriter = nil
 
 type BufferedLogWriter struct {
 	logMutex    sync.Mutex
@@ -31,18 +32,27 @@ type BufferedLogWriter struct {
 	buffer      strings.Builder
 	chanFlush   chan struct{}
 	chanClose   chan struct{}
+	chanDone    chan struct{}
+	doneOnce    sync.Once
 	fileHandle  *os.File
 	flushForce  bool
 }
 
 func CreateBufferedLogWriter(logKey string) *BufferedLogWriter {
-	logDir := os.Getenv("HOME") + string(os.PathSeparator) + "log"
+	return createBufferedLogWriter(logKey, "")
+}
+
+func createBufferedLogWriter(logKey, logDir string) *BufferedLogWriter {
+	if logDir == "" {
+		logDir = os.Getenv("HOME") + string(os.PathSeparator) + "log"
+	}
 	logPrefix := logDir + string(os.PathSeparator) + logKey
 	return &BufferedLogWriter{
 		logDir:     logDir,
 		logPrefix:  logPrefix,
 		chanFlush:  make(chan struct{}, 512),
 		chanClose:  make(chan struct{}, 512),
+		chanDone:   make(chan struct{}),
 		fileHandle: nil,
 	}
 }
@@ -59,9 +69,12 @@ func (b *BufferedLogWriter) CheckLogDirExists(logKey string) bool {
 func (b *BufferedLogWriter) CheckLogFileRotation() string {
 	fileName := b.logPrefix + "_" + time.Now().Format(Consts.DateDF) + ".log"
 	st, err := os.Stat(fileName)
+	b.logMutex.Lock()
+	defer b.logMutex.Unlock()
+
 	if b.fileHandle == nil || err != nil {
-		b.CreateLogFile(fileName)
 		prevFileName := b.fileName
+		b.createLogFileLocked(fileName)
 		b.fileName = fileName
 		return prevFileName
 	} else if st.IsDir() {
@@ -71,12 +84,20 @@ func (b *BufferedLogWriter) CheckLogFileRotation() string {
 }
 
 func (b *BufferedLogWriter) CreateLogFile(fileName string) {
-	b.Close()
+	b.logMutex.Lock()
+	defer b.logMutex.Unlock()
+
+	b.createLogFileLocked(fileName)
+}
+
+func (b *BufferedLogWriter) createLogFileLocked(fileName string) {
 	fh, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		fmt.Printf("create Log File %s Error : %v, use default stdout\n", fileName, err)
 		return
 	}
+
+	b.closeLocked()
 	b.fileHandle = fh
 }
 
@@ -92,11 +113,11 @@ func (b *BufferedLogWriter) writeFlushChan() {
 }
 
 func (b *BufferedLogWriter) writeLogChan(ch chan struct{}) {
-	if len(ch) >= cap(ch) {
+	select {
+	case ch <- struct{}{}:
+	default:
 		fmt.Printf("log writer chan full\n")
-		return
 	}
-	ch <- struct{}{}
 }
 
 func (b *BufferedLogWriter) Write(p []byte) (n int, err error) {
@@ -121,6 +142,10 @@ func (b *BufferedLogWriter) Close() {
 	b.logMutex.Lock()
 	defer b.logMutex.Unlock()
 
+	b.closeLocked()
+}
+
+func (b *BufferedLogWriter) closeLocked() {
 	if b.fileHandle != nil {
 		b.fileHandle.Sync()
 		b.fileHandle.Close()
@@ -146,16 +171,24 @@ func (b *BufferedLogWriter) flush() {
 }
 
 func (b *BufferedLogWriter) writeFile(s []byte) {
-	if len(s) > 0 {
-		fileHandle := b.fileHandle
-		if fileHandle == nil {
-			fileHandle = os.Stdout
-		}
-		fileHandle.Write(s)
+	if len(s) == 0 {
+		return
 	}
+
+	b.logMutex.Lock()
+	defer b.logMutex.Unlock()
+
+	fileHandle := b.fileHandle
+	if fileHandle == nil {
+		fileHandle = os.Stdout
+	}
+	_, _ = fileHandle.Write(s)
 }
 
 func (b *BufferedLogWriter) forceFlush(flush bool) {
+	b.bufferMutex.Lock()
+	defer b.bufferMutex.Unlock()
+
 	if flush != b.flushForce {
 		fmt.Printf("force flush flag change to : %v\n", flush)
 		b.flushForce = flush
@@ -165,6 +198,7 @@ func (b *BufferedLogWriter) forceFlush(flush bool) {
 func (b *BufferedLogWriter) autoFlush() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+	defer b.closeDone()
 
 	for {
 		select {
@@ -181,41 +215,101 @@ func (b *BufferedLogWriter) autoFlush() {
 	}
 }
 
+func (b *BufferedLogWriter) closeDone() {
+	b.doneOnce.Do(func() {
+		close(b.chanDone)
+	})
+}
+
+func (b *BufferedLogWriter) getFileName() string {
+	b.logMutex.Lock()
+	defer b.logMutex.Unlock()
+
+	return b.fileName
+}
+
 func SetOutput(logBaseName string) {
+	setOutput(logBaseName, "")
+}
+
+func setOutput(logBaseName, logDir string) {
+	CloseOutput()
+
+	writer := createBufferedLogWriter(logBaseName, logDir)
+
+	bufferLogWriterMu.Lock()
 	logKey = logBaseName
-	bufferLogWriter = CreateBufferedLogWriter(logKey)
-	bufferLogWriter.CheckLogFileRotation()
-	l.SetOutput(bufferLogWriter)
-	ForceFlush(true)
-	go bufferLogWriter.autoFlush()
-	go func() {
+	bufferLogWriter = writer
+	bufferLogWriterMu.Unlock()
+
+	writer.CheckLogFileRotation()
+	l.SetOutput(writer)
+	writer.forceFlush(true)
+
+	go writer.autoFlush()
+	go func(writer *BufferedLogWriter, logKey string) {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+
 		for {
-			bufferLogWriter.CheckLogDirExists(logKey)
-			rotationFile := bufferLogWriter.CheckLogFileRotation()
-			if len(rotationFile) > 0 {
-				fmt.Printf("log file rotated : file : %s, new file : %s\n", rotationFile, bufferLogWriter.fileName)
+			select {
+			case <-writer.chanDone:
+				return
+			case <-ticker.C:
+				writer.CheckLogDirExists(logKey)
+				rotationFile := writer.CheckLogFileRotation()
+				if len(rotationFile) > 0 {
+					fmt.Printf("log file rotated : file : %s, new file : %s\n", rotationFile, writer.getFileName())
+				}
 			}
-			time.Sleep(time.Second)
 		}
-	}()
-	go func() {
+	}(writer, logKey)
+	go func(writer *BufferedLogWriter) {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
 		for {
-			time.Sleep(5 * time.Second)
-			ForceFlush(false)
+			select {
+			case <-writer.chanDone:
+				return
+			case <-ticker.C:
+				writer.forceFlush(false)
+			}
 		}
-	}()
+	}(writer)
 }
 
 func ForceFlush(forceFlush bool) {
-	if bufferLogWriter != nil {
-		bufferLogWriter.forceFlush(forceFlush)
+	if writer := getBufferedLogWriter(); writer != nil {
+		writer.forceFlush(forceFlush)
 	}
 }
 
 func CloseOutput() {
-	if bufferLogWriter != nil {
-		bufferLogWriter.writeCloseChan()
+	if writer := getBufferedLogWriter(); writer != nil {
+		writer.writeCloseChan()
 	}
+}
+
+func getLogWriterAndKey() (*BufferedLogWriter, string) {
+	bufferLogWriterMu.RLock()
+	defer bufferLogWriterMu.RUnlock()
+
+	return bufferLogWriter, logKey
+}
+
+func getBufferedLogWriter() *BufferedLogWriter {
+	bufferLogWriterMu.RLock()
+	defer bufferLogWriterMu.RUnlock()
+
+	return bufferLogWriter
+}
+
+func getLogKey() string {
+	bufferLogWriterMu.RLock()
+	defer bufferLogWriterMu.RUnlock()
+
+	return logKey
 }
 
 func getLogFileCreateDate(file string) string {
@@ -249,6 +343,11 @@ func makeLogSubDir(dir string) bool {
 }
 
 func moveOldLogFiles(logDir string) {
+	currentLogKey := getLogKey()
+	if currentLogKey == "" {
+		return
+	}
+
 	f, err := os.OpenFile(logDir, os.O_RDONLY, os.ModeDir)
 	if err != nil {
 		return
@@ -257,7 +356,7 @@ func moveOldLogFiles(logDir string) {
 
 	fileList, _ := f.Readdir(-1)
 	for _, v := range fileList {
-		if !v.IsDir() && strings.HasPrefix(v.Name(), logKey) && strings.HasSuffix(v.Name(), logPathDelimiter+"log") {
+		if !v.IsDir() && strings.HasPrefix(v.Name(), currentLogKey) && strings.HasSuffix(v.Name(), logPathDelimiter+"log") {
 			todayDate := time.Now().Format(Consts.DateDF)
 			createDate := getLogFileCreateDate(v.Name())
 			if len(createDate) == 0 || todayDate == createDate {
@@ -306,11 +405,11 @@ func cleanOldLogFiles(logDir string) {
 
 func ArchiveLogFiles() {
 	time.Sleep(5 * time.Second)
-	for logKey == "" {
+	for getLogKey() == "" {
 		time.Sleep(time.Second)
 	}
 	logDir := os.Getenv("HOME") + "/log"
-	Criticalf("Old Log Dir Keep Month : %d, LogKey: %s\n", keepLogDays, logKey)
+	Criticalf("Old Log Dir Keep Month : %d, LogKey: %s\n", keepLogDays, getLogKey())
 
 	for {
 		moveOldLogFiles(logDir)

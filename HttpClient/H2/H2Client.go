@@ -3,12 +3,13 @@ package H2
 import (
 	"bytes"
 	"crypto/tls"
-	"github.com/tauruscorpius/appcommon/Log"
-	"golang.org/x/net/http2"
 	"io"
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/tauruscorpius/appcommon/Log"
+	"golang.org/x/net/http2"
 )
 
 var (
@@ -30,7 +31,8 @@ func getClientInstance() *http.Client {
 	return http2ClientServer
 }
 
-func postRetry(url string, reader *bytes.Reader) (error, *http.Response) {
+func postOnce(url string, reader *bytes.Reader) (error, *http.Response) {
+	_, _ = reader.Seek(0, io.SeekStart)
 	resp, err := getClientInstance().Post(url, "application/json", reader)
 	if err != nil {
 		Log.Debugf("error making request : %v\n", err)
@@ -40,18 +42,18 @@ func postRetry(url string, reader *bytes.Reader) (error, *http.Response) {
 }
 
 func PostH2(url string, reader *bytes.Reader, readBody bool) (int, string, error) {
-	err, resp := postRetry(url, reader)
-	if err != nil {
-		err, resp = postRetry(url, reader)
-	}
+	err, resp := postOnce(url, reader)
 	if err != nil {
 		Log.Debugf("error making request : %v\n", err)
 		return 0, "", err
 	}
+	defer resp.Body.Close()
 	if readBody {
-		body, _ := io.ReadAll(resp.Body)
+		body, errBody := io.ReadAll(resp.Body)
+		if errBody != nil {
+			return resp.StatusCode, "", errBody
+		}
 		return resp.StatusCode, string(body), nil
 	}
-	resp.Body.Close()
 	return resp.StatusCode, "", nil
 }

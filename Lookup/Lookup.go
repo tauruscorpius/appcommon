@@ -3,6 +3,12 @@ package Lookup
 import (
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/tauruscorpius/appcommon/ApiService"
 	"github.com/tauruscorpius/appcommon/Consts"
 	"github.com/tauruscorpius/appcommon/ExitHandler"
@@ -13,11 +19,6 @@ import (
 	"github.com/tauruscorpius/appcommon/Lookup/LookupDS"
 	"github.com/tauruscorpius/appcommon/Lookup/RpcDS"
 	"github.com/tauruscorpius/appcommon/Utility/Perf"
-	"io"
-	"net/http"
-	"strings"
-	"sync"
-	"time"
 )
 
 const (
@@ -93,7 +94,11 @@ func (t *NodeLookupClient) SetEventRequestHook(f func(eventId string, eventArgs 
 }
 
 func (t *NodeLookupClient) RpcNodeUpdated() {
-	t.RpcNodeUpdate <- struct{}{}
+	select {
+	case t.RpcNodeUpdate <- struct{}{}:
+	default:
+		Log.Warnf("rpc node update channel is full, coalescing update signal\n")
+	}
 }
 
 func (t *NodeLookupClient) CreateClientUpdateHook(regNodes []LookupDS.ServiceNode) bool {
@@ -339,6 +344,11 @@ func (t *NodeLookupClient) CbMethodServiceEvent(w http.ResponseWriter, r *http.R
 
 		Log.Criticalf("Received Event Request : eventId[%s] Event Args[%+v]\n", eventRequest.EventId, eventRequest.EventArgs)
 
+		if t.eventRequestHook == nil {
+			Log.Errorf("eventRequestHook is nil\n")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		result := t.eventRequestHook(eventRequest.EventId, eventRequest.EventArgs)
 
 		w.Header().Add("Content-Type", "application/json")

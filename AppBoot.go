@@ -82,7 +82,7 @@ func AppInit(svcMapping []ApiService.PathMapping) bool {
 	ApiService.GetAppService().MergeMapping(svcMapping)
 
 	lookUpArs := LookupArgs.GetLookupAppArgs()
-	ApiService.GetAppService().StartHttpApi(lookUpArs.ServerHost, lookUpArs.BindAddrAny)
+	httpApiStart := ApiService.GetAppService().StartHttpApi(lookUpArs.ServerHost, lookUpArs.BindAddrAny)
 
 	// register nodes
 	lookUpDs := lookUpClient.GetDataStore()
@@ -92,6 +92,10 @@ func AppInit(svcMapping []ApiService.PathMapping) bool {
 
 	// client register and updated
 	if suc := lookUpClient.CreateClientUpdateHook(regNodes); !suc {
+		return false
+	}
+	if err := httpApiStart.Check(); err != nil {
+		Log.Errorf("Start Http API failed, error : %v\n", err)
 		return false
 	}
 

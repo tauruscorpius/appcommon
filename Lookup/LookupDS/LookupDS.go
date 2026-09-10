@@ -1,12 +1,13 @@
 package LookupDS
 
 import (
-	uuid "github.com/satori/go.uuid"
-	"github.com/tauruscorpius/appcommon/Lookup/LookupConsts"
 	"sort"
 	"strconv"
 	"sync"
 	"time"
+
+	uuid "github.com/satori/go.uuid"
+	"github.com/tauruscorpius/appcommon/Lookup/LookupConsts"
 )
 
 type NodeQueryFilter struct {
@@ -89,20 +90,22 @@ func (t *MapRegisterNode) erase(filter func(node *RegisterNode) bool) {
 }
 
 func (t *MapRegisterNode) Sort() []*RegisterNode {
-	t.rw.Lock()
-	defer t.rw.Unlock()
-	var resNode []*RegisterNode
+	t.rw.RLock()
+	defer t.rw.RUnlock()
+
+	resNode := make([]*RegisterNode, 0, len(t.regNodes))
 	for _, v := range t.regNodes {
-		resNode = append(resNode, &v)
+		node := v
+		resNode = append(resNode, &node)
 	}
-	// sort it
 	sort.Slice(resNode, func(i, j int) bool { return resNode[i].Uid < resNode[j].Uid })
 	return resNode
 }
 
 func (t *MapRegisterNode) SortWithFilter(uidFilter, typeFilter NodeQueryFilter) []RegisterNode {
-	t.rw.Lock()
-	defer t.rw.Unlock()
+	t.rw.RLock()
+	defer t.rw.RUnlock()
+
 	var resNode []RegisterNode
 	for _, v := range t.regNodes {
 		if uidFilter.Kill(v.Uid) {
@@ -119,6 +122,9 @@ func (t *MapRegisterNode) SortWithFilter(uidFilter, typeFilter NodeQueryFilter) 
 }
 
 func (t *MapRegisterNode) Equal(n *RegisterNode) bool {
+	t.rw.RLock()
+	defer t.rw.RUnlock()
+
 	for _, v := range t.regNodes {
 		if n.Uid == v.Uid && n.ServedLookupUid == v.ServedLookupUid {
 			return true

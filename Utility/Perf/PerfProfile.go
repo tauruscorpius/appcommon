@@ -2,12 +2,13 @@ package Perf
 
 import (
 	"errors"
-	"github.com/tauruscorpius/appcommon/Log"
-	"github.com/tauruscorpius/appcommon/Utility/UUID"
 	"net/http"
 	_ "net/http/pprof"
 	"sync"
 	"time"
+
+	"github.com/tauruscorpius/appcommon/Log"
+	"github.com/tauruscorpius/appcommon/Utility/UUID"
 )
 
 type PerfProfServer struct {
@@ -77,7 +78,7 @@ func (t *PerfProfServer) check() string {
 	t.rw.Lock()
 	defer t.rw.Unlock()
 
-	if t.server != nil {
+	if t.server == nil {
 		return "not running"
 	}
 

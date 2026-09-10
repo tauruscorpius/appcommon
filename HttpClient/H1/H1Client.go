@@ -2,12 +2,14 @@ package H1
 
 import (
 	"bytes"
-	"github.com/tauruscorpius/appcommon/Log"
 	"io"
 	"net/http"
+
+	"github.com/tauruscorpius/appcommon/Log"
 )
 
-func postRetry(url string, reader *bytes.Reader) (error, *http.Response) {
+func postOnce(url string, reader *bytes.Reader) (error, *http.Response) {
+	_, _ = reader.Seek(0, io.SeekStart)
 	resp, err := http.Post(url, "application/json", reader)
 	if err != nil {
 		Log.Debugf("error making request : %v\n", err)
@@ -17,18 +19,18 @@ func postRetry(url string, reader *bytes.Reader) (error, *http.Response) {
 }
 
 func PostH1(url string, reader *bytes.Reader, readBody bool) (int, string, error) {
-	err, resp := postRetry(url, reader)
-	if err != nil {
-		err, resp = postRetry(url, reader)
-	}
+	err, resp := postOnce(url, reader)
 	if err != nil {
 		Log.Debugf("error making request : %v\n", err)
 		return 0, "", err
 	}
+	defer resp.Body.Close()
 	if readBody {
-		body, _ := io.ReadAll(resp.Body)
+		body, errBody := io.ReadAll(resp.Body)
+		if errBody != nil {
+			return resp.StatusCode, "", errBody
+		}
 		return resp.StatusCode, string(body), nil
 	}
-	resp.Body.Close()
 	return resp.StatusCode, "", nil
 }
