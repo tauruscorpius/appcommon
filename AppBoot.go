@@ -19,7 +19,7 @@ import (
 // update notify
 // ... (Service's)
 
-func BootInit(nodeType LookupConsts.ServiceNodeType) bool {
+func BootInit(nodeType LookupConsts.ServiceNodeType, rollingLogConfig ...*Log.RollingLogConfig) bool {
 	lookUpClient := Lookup.GetNodeLookupClient()
 	lookUpArgs := LookupArgs.GetLookupAppArgs()
 
@@ -28,7 +28,16 @@ func BootInit(nodeType LookupConsts.ServiceNodeType) bool {
 		return false
 	}
 
-	Log.SetOutput(string(nodeType) + "." + lookUpArgs.Identifier)
+	defaultLogKey := string(nodeType) + "." + lookUpArgs.Identifier
+	if len(rollingLogConfig) > 0 && rollingLogConfig[0] != nil {
+		cfg := *rollingLogConfig[0]
+		if cfg.LogKey == "" {
+			cfg.LogKey = defaultLogKey
+		}
+		Log.SetOutputWithConfig(cfg)
+	} else {
+		Log.SetOutput(defaultLogKey)
+	}
 
 	// Max P
 	Log.Criticalf("Number of cpu num[%v] \n", runtime.NumCPU())

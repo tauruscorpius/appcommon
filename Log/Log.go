@@ -84,5 +84,4 @@ func Init() {
 	l.SetFormatter(formatter)
 	l.SetLevel(logrus.TraceLevel)
 	l.SetOutput(os.Stdout)
-	go ArchiveLogFiles()
 }

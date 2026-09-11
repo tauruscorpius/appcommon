@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,99 +15,202 @@ import (
 )
 
 const (
-	logPathDelimiter = "."
+	defaultMaxLogFileSize  int64 = 100 * 1024 * 1024
+	defaultMaxLogBackups         = 30
+	defaultFlushInterval         = time.Second
+	defaultLogBufferSize         = 1024 * 1024
+	MaxBufferedLogFileSize       = 50 * 1024 * 1024
+	WriteLogFileSize             = defaultLogBufferSize
 )
 
+type RollingLogConfig struct {
+	Dir           string
+	LogKey        string
+	MaxFileSize   int64
+	MaxBackups    int
+	FlushInterval time.Duration
+	BufferSize    int
+}
+
 var (
-	keepLogDays       = 30
 	logKey            string
 	bufferLogWriter   *BufferedLogWriter
 	bufferLogWriterMu sync.RWMutex
 )
 
 type BufferedLogWriter struct {
-	logMutex    sync.Mutex
-	logDir      string
-	logPrefix   string
-	fileName    string
-	bufferMutex sync.RWMutex
+	mu          sync.Mutex
+	cfg         RollingLogConfig
 	buffer      strings.Builder
-	chanFlush   chan struct{}
-	chanClose   chan struct{}
-	chanDone    chan struct{}
-	doneOnce    sync.Once
 	fileHandle  *os.File
+	fileName    string
+	activeDate  string
+	sequence    int
+	currentSize int64
 	flushForce  bool
+	closed      bool
+
+	chanFlush chan struct{}
+	chanClose chan struct{}
+	chanDone  chan struct{}
+	doneOnce  sync.Once
 }
 
 func CreateBufferedLogWriter(logKey string) *BufferedLogWriter {
-	return createBufferedLogWriter(logKey, "")
+	return newBufferedLogWriter(defaultRollingLogConfig(logKey, ""))
 }
 
 func createBufferedLogWriter(logKey, logDir string) *BufferedLogWriter {
-	if logDir == "" {
-		logDir = os.Getenv("HOME") + string(os.PathSeparator) + "log"
-	}
-	logPrefix := logDir + string(os.PathSeparator) + logKey
+	return newBufferedLogWriter(defaultRollingLogConfig(logKey, logDir))
+}
+
+func newBufferedLogWriter(cfg RollingLogConfig) *BufferedLogWriter {
+	cfg = withRollingLogConfigDefaults(cfg)
 	return &BufferedLogWriter{
-		logDir:     logDir,
-		logPrefix:  logPrefix,
-		chanFlush:  make(chan struct{}, 512),
-		chanClose:  make(chan struct{}, 512),
-		chanDone:   make(chan struct{}),
-		fileHandle: nil,
+		cfg:       cfg,
+		chanFlush: make(chan struct{}, 512),
+		chanClose: make(chan struct{}, 1),
+		chanDone:  make(chan struct{}),
 	}
 }
 
-func (b *BufferedLogWriter) CheckLogDirExists(logKey string) bool {
-	err := os.MkdirAll(b.logDir, 0777)
+func SetOutput(logBaseName string) {
+	SetOutputWithConfig(RollingLogConfig{LogKey: logBaseName})
+}
+
+func SetOutputWithConfig(cfg RollingLogConfig) {
+	CloseOutput()
+
+	writer := newBufferedLogWriter(cfg)
+
+	bufferLogWriterMu.Lock()
+	logKey = writer.cfg.LogKey
+	bufferLogWriter = writer
+	bufferLogWriterMu.Unlock()
+
+	l.SetOutput(writer)
+	writer.forceFlush(true)
+	go writer.autoFlush()
+}
+
+func setOutput(logBaseName, logDir string) {
+	SetOutputWithConfig(RollingLogConfig{LogKey: logBaseName, Dir: logDir})
+}
+
+func defaultRollingLogConfig(logKey, logDir string) RollingLogConfig {
+	if logDir == "" {
+		logDir = filepath.Join(os.Getenv("HOME"), "log")
+	}
+	return RollingLogConfig{
+		Dir:           logDir,
+		LogKey:        logKey,
+		MaxFileSize:   defaultMaxLogFileSize,
+		MaxBackups:    defaultMaxLogBackups,
+		FlushInterval: defaultFlushInterval,
+		BufferSize:    defaultLogBufferSize,
+	}
+}
+
+func withRollingLogConfigDefaults(cfg RollingLogConfig) RollingLogConfig {
+	if cfg.Dir == "" {
+		cfg.Dir = filepath.Join(os.Getenv("HOME"), "log")
+	}
+	if cfg.MaxFileSize <= 0 {
+		cfg.MaxFileSize = defaultMaxLogFileSize
+	}
+	if cfg.MaxBackups < 0 {
+		cfg.MaxBackups = 0
+	}
+	if cfg.FlushInterval <= 0 {
+		cfg.FlushInterval = defaultFlushInterval
+	}
+	if cfg.BufferSize <= 0 {
+		cfg.BufferSize = defaultLogBufferSize
+	}
+	return cfg
+}
+
+func (b *BufferedLogWriter) Write(p []byte) (n int, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.closed {
+		return 0, errors.New("log writer closed")
+	}
+	if b.buffer.Len()+len(p) > MaxBufferedLogFileSize {
+		return 0, errors.New("buffer overflow")
+	}
+	n, err = b.buffer.Write(p)
 	if err != nil {
-		fmt.Printf("create log dir %s error : %v\n", b.logDir, err)
+		return n, err
+	}
+	if b.flushForce || b.buffer.Len() >= b.cfg.BufferSize {
+		if err := b.flushLocked(); err != nil {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+func (b *BufferedLogWriter) Close() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.closed {
+		return
+	}
+	if err := b.flushLocked(); err != nil {
+		fmt.Printf("flush log on close error : %v\n", err)
+	}
+	b.closeFileLocked()
+	b.closed = true
+	b.closeDone()
+}
+
+func (b *BufferedLogWriter) closeAndWait() {
+	b.writeCloseChan()
+	<-b.chanDone
+}
+
+func (b *BufferedLogWriter) CheckLogDirExists(logKey string) bool {
+	err := os.MkdirAll(b.cfg.Dir, 0777)
+	if err != nil {
+		fmt.Printf("create log dir %s error : %v\n", b.cfg.Dir, err)
 		return false
 	}
 	return true
 }
 
 func (b *BufferedLogWriter) CheckLogFileRotation() string {
-	fileName := b.logPrefix + "_" + time.Now().Format(Consts.DateDF) + ".log"
-	st, err := os.Stat(fileName)
-	b.logMutex.Lock()
-	defer b.logMutex.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-	if b.fileHandle == nil || err != nil {
-		prevFileName := b.fileName
-		b.createLogFileLocked(fileName)
-		b.fileName = fileName
-		return prevFileName
-	} else if st.IsDir() {
-		fmt.Printf("log file name conflict with dir name : " + fileName)
+	today := time.Now().Format(Consts.DateDF)
+	if b.fileHandle != nil && b.activeDate == today {
+		return ""
 	}
-	return ""
+	prev := b.fileName
+	if err := b.rotateLocked(time.Now()); err != nil {
+		fmt.Printf("rotate log file error : %v\n", err)
+		return prev
+	}
+	return prev
 }
 
 func (b *BufferedLogWriter) CreateLogFile(fileName string) {
-	b.logMutex.Lock()
-	defer b.logMutex.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-	b.createLogFileLocked(fileName)
-}
-
-func (b *BufferedLogWriter) createLogFileLocked(fileName string) {
-	fh, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
+	if err := b.createLogFileLocked(fileName); err != nil {
 		fmt.Printf("create Log File %s Error : %v, use default stdout\n", fileName, err)
-		return
 	}
-
-	b.closeLocked()
-	b.fileHandle = fh
 }
-
-const WriteLogFileSize = 1024 * 1024
-const MaxBufferedLogFileSize = 50 * 1024 * 1024
 
 func (b *BufferedLogWriter) writeCloseChan() {
-	b.writeLogChan(b.chanClose)
+	select {
+	case b.chanClose <- struct{}{}:
+	case <-b.chanDone:
+	}
 }
 
 func (b *BufferedLogWriter) writeFlushChan() {
@@ -120,32 +225,108 @@ func (b *BufferedLogWriter) writeLogChan(ch chan struct{}) {
 	}
 }
 
-func (b *BufferedLogWriter) Write(p []byte) (n int, err error) {
-	b.bufferMutex.Lock()
-	defer b.bufferMutex.Unlock()
-	if b.flushForce {
-		b.writeFile(p)
-		return len(p), nil
-	} else {
-		if b.buffer.Len() >= MaxBufferedLogFileSize {
-			return 0, errors.New("buffer overflow")
-		}
-		a, e := b.buffer.Write(p)
-		if b.buffer.Len() >= WriteLogFileSize || b.flushForce {
-			b.writeFlushChan()
-		}
-		return a, e
+func (b *BufferedLogWriter) flush() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if err := b.flushLocked(); err != nil {
+		fmt.Printf("flush log error : %v\n", err)
 	}
 }
 
-func (b *BufferedLogWriter) Close() {
-	b.logMutex.Lock()
-	defer b.logMutex.Unlock()
-
-	b.closeLocked()
+func (b *BufferedLogWriter) flushLocked() error {
+	if b.buffer.Len() == 0 {
+		return nil
+	}
+	data := b.buffer.String()
+	b.buffer.Reset()
+	return b.writeFileLocked([]byte(data))
 }
 
-func (b *BufferedLogWriter) closeLocked() {
+func (b *BufferedLogWriter) writeFile(s []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if err := b.writeFileLocked(s); err != nil {
+		fmt.Printf("write log file error : %v\n", err)
+	}
+}
+
+func (b *BufferedLogWriter) writeFileLocked(s []byte) error {
+	if len(s) == 0 {
+		return nil
+	}
+	if err := b.ensureLogFileLocked(len(s)); err != nil {
+		_, _ = os.Stdout.Write(s)
+		return err
+	}
+	n, err := b.fileHandle.Write(s)
+	b.currentSize += int64(n)
+	return err
+}
+
+func (b *BufferedLogWriter) ensureLogFileLocked(nextWriteBytes int) error {
+	now := time.Now()
+	today := now.Format(Consts.DateDF)
+	if b.fileHandle == nil || b.activeDate != today || b.currentLogFileRemovedLocked() || b.currentSize+int64(nextWriteBytes) > b.cfg.MaxFileSize {
+		return b.rotateLocked(now)
+	}
+	return nil
+}
+
+func (b *BufferedLogWriter) currentLogFileRemovedLocked() bool {
+	if b.fileName == "" {
+		return false
+	}
+	st, err := os.Stat(b.fileName)
+	if err == nil {
+		b.currentSize = st.Size()
+		return false
+	}
+	if os.IsNotExist(err) {
+		b.closeFileLocked()
+		b.currentSize = 0
+		return true
+	}
+	return false
+}
+
+func (b *BufferedLogWriter) rotateLocked(now time.Time) error {
+	if err := os.MkdirAll(b.cfg.Dir, 0777); err != nil {
+		return err
+	}
+	today := now.Format(Consts.DateDF)
+	if b.activeDate != today {
+		b.activeDate = today
+		b.sequence = b.maxSequenceForDateLocked(today)
+	}
+	b.sequence++
+
+	fileName := b.buildLogFileName(now, b.sequence)
+	if err := b.createLogFileLocked(filepath.Join(b.cfg.Dir, fileName)); err != nil {
+		return err
+	}
+	b.fileName = filepath.Join(b.cfg.Dir, fileName)
+	b.currentSize = 0
+	b.cleanBackupsLocked()
+	return nil
+}
+
+func (b *BufferedLogWriter) buildLogFileName(now time.Time, sequence int) string {
+	return fmt.Sprintf("%s_%s_%s_%03d.log", b.cfg.LogKey, now.Format(Consts.DateDF), now.Format("150405"), sequence)
+}
+
+func (b *BufferedLogWriter) createLogFileLocked(fileName string) error {
+	fh, err := os.OpenFile(fileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		return err
+	}
+	b.closeFileLocked()
+	b.fileHandle = fh
+	return nil
+}
+
+func (b *BufferedLogWriter) closeFileLocked() {
 	if b.fileHandle != nil {
 		b.fileHandle.Sync()
 		b.fileHandle.Close()
@@ -153,41 +334,9 @@ func (b *BufferedLogWriter) closeLocked() {
 	}
 }
 
-func (b *BufferedLogWriter) getBuffer() string {
-	b.bufferMutex.Lock()
-	defer b.bufferMutex.Unlock()
-	if b.buffer.Len() == 0 {
-		return ""
-	}
-	var s string
-	s += b.buffer.String()
-	b.buffer.Reset()
-	return s
-}
-
-func (b *BufferedLogWriter) flush() {
-	s := b.getBuffer()
-	b.writeFile([]byte(s))
-}
-
-func (b *BufferedLogWriter) writeFile(s []byte) {
-	if len(s) == 0 {
-		return
-	}
-
-	b.logMutex.Lock()
-	defer b.logMutex.Unlock()
-
-	fileHandle := b.fileHandle
-	if fileHandle == nil {
-		fileHandle = os.Stdout
-	}
-	_, _ = fileHandle.Write(s)
-}
-
 func (b *BufferedLogWriter) forceFlush(flush bool) {
-	b.bufferMutex.Lock()
-	defer b.bufferMutex.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
 	if flush != b.flushForce {
 		fmt.Printf("force flush flag change to : %v\n", flush)
@@ -196,7 +345,7 @@ func (b *BufferedLogWriter) forceFlush(flush bool) {
 }
 
 func (b *BufferedLogWriter) autoFlush() {
-	ticker := time.NewTicker(1 * time.Second)
+	ticker := time.NewTicker(b.cfg.FlushInterval)
 	defer ticker.Stop()
 	defer b.closeDone()
 
@@ -207,9 +356,14 @@ func (b *BufferedLogWriter) autoFlush() {
 		case <-b.chanFlush:
 			b.flush()
 		case <-b.chanClose:
-			b.Write([]byte("close log writer\n"))
-			b.flush()
-			b.Close()
+			b.mu.Lock()
+			_, _ = b.buffer.WriteString("close log writer\n")
+			if err := b.flushLocked(); err != nil {
+				fmt.Printf("flush log on close error : %v\n", err)
+			}
+			b.closeFileLocked()
+			b.closed = true
+			b.mu.Unlock()
 			return
 		}
 	}
@@ -222,61 +376,38 @@ func (b *BufferedLogWriter) closeDone() {
 }
 
 func (b *BufferedLogWriter) getFileName() string {
-	b.logMutex.Lock()
-	defer b.logMutex.Unlock()
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
 	return b.fileName
 }
 
-func SetOutput(logBaseName string) {
-	setOutput(logBaseName, "")
+func (b *BufferedLogWriter) bufferLen() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.buffer.Len()
 }
 
-func setOutput(logBaseName, logDir string) {
-	CloseOutput()
+func (b *BufferedLogWriter) resetBuffer() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-	writer := createBufferedLogWriter(logBaseName, logDir)
+	b.buffer.Reset()
+}
 
-	bufferLogWriterMu.Lock()
-	logKey = logBaseName
-	bufferLogWriter = writer
-	bufferLogWriterMu.Unlock()
+func (b *BufferedLogWriter) isForceFlush() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-	writer.CheckLogFileRotation()
-	l.SetOutput(writer)
-	writer.forceFlush(true)
+	return b.flushForce
+}
 
-	go writer.autoFlush()
-	go func(writer *BufferedLogWriter, logKey string) {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
+func (b *BufferedLogWriter) isFileOpen() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 
-		for {
-			select {
-			case <-writer.chanDone:
-				return
-			case <-ticker.C:
-				writer.CheckLogDirExists(logKey)
-				rotationFile := writer.CheckLogFileRotation()
-				if len(rotationFile) > 0 {
-					fmt.Printf("log file rotated : file : %s, new file : %s\n", rotationFile, writer.getFileName())
-				}
-			}
-		}
-	}(writer, logKey)
-	go func(writer *BufferedLogWriter) {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-writer.chanDone:
-				return
-			case <-ticker.C:
-				writer.forceFlush(false)
-			}
-		}
-	}(writer)
+	return b.fileHandle != nil
 }
 
 func ForceFlush(forceFlush bool) {
@@ -287,7 +418,7 @@ func ForceFlush(forceFlush bool) {
 
 func CloseOutput() {
 	if writer := getBufferedLogWriter(); writer != nil {
-		writer.writeCloseChan()
+		writer.closeAndWait()
 	}
 }
 
@@ -305,19 +436,91 @@ func getBufferedLogWriter() *BufferedLogWriter {
 	return bufferLogWriter
 }
 
-func getLogKey() string {
-	bufferLogWriterMu.RLock()
-	defer bufferLogWriterMu.RUnlock()
+func (b *BufferedLogWriter) logFilesLocked() []os.FileInfo {
+	dirEntries, err := os.ReadDir(b.cfg.Dir)
+	if err != nil {
+		return nil
+	}
+	var files []os.FileInfo
+	for _, entry := range dirEntries {
+		if entry.IsDir() || !b.isRollingLogFile(entry.Name()) {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil {
+			files = append(files, info)
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
+	return files
+}
 
-	return logKey
+func (b *BufferedLogWriter) cleanBackupsLocked() {
+	if b.cfg.MaxBackups <= 0 {
+		return
+	}
+	files := b.logFilesLocked()
+	for len(files) > b.cfg.MaxBackups {
+		_ = os.Remove(filepath.Join(b.cfg.Dir, files[0].Name()))
+		files = files[1:]
+	}
+}
+
+func (b *BufferedLogWriter) maxSequenceForDateLocked(date string) int {
+	files := b.logFilesLocked()
+	maxSeq := 0
+	for _, file := range files {
+		parsedDate, seq, ok := b.parseRollingLogFile(file.Name())
+		if ok && parsedDate == date && seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+	return maxSeq
+}
+
+func (b *BufferedLogWriter) isRollingLogFile(fileName string) bool {
+	_, _, ok := b.parseRollingLogFile(fileName)
+	return ok
+}
+
+func (b *BufferedLogWriter) parseRollingLogFile(fileName string) (string, int, bool) {
+	prefix := b.cfg.LogKey + "_"
+	if !strings.HasPrefix(fileName, prefix) || !strings.HasSuffix(fileName, ".log") {
+		return "", 0, false
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(fileName, prefix), ".log")
+	parts := strings.Split(body, "_")
+	if len(parts) != 3 || len(parts[0]) != 8 || len(parts[1]) != 6 || len(parts[2]) != 3 {
+		return "", 0, false
+	}
+	if _, err := time.Parse("20060102_150405", parts[0]+"_"+parts[1]); err != nil {
+		return "", 0, false
+	}
+	seq, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return "", 0, false
+	}
+	return parts[0], seq, true
 }
 
 func getLogFileCreateDate(file string) string {
-	ar := strings.Split(file, logPathDelimiter)
-	if len(ar) < 2 {
+	if strings.Contains(file, ".") {
+		parts := strings.Split(file, ".")
+		for _, part := range parts {
+			if len(part) != 8 {
+				continue
+			}
+			if _, err := strconv.Atoi(part); err == nil {
+				return part
+			}
+		}
+	}
+
+	parts := strings.Split(strings.TrimSuffix(file, ".log"), "_")
+	if len(parts) < 3 {
 		return ""
 	}
-	dateExpect := ar[len(ar)-2]
+	dateExpect := parts[len(parts)-3]
 	if len(dateExpect) != 8 {
 		return ""
 	}
@@ -326,96 +529,6 @@ func getLogFileCreateDate(file string) string {
 		return ""
 	}
 	return dateExpect
-}
-
-func makeLogSubDir(dir string) bool {
-	dirExist, err := IsDirExisting(dir)
-	if err != nil {
-		return false
-	}
-	if !dirExist {
-		err = os.MkdirAll(dir, 0777)
-		if err != nil {
-			return false
-		}
-	}
-	return true
-}
-
-func moveOldLogFiles(logDir string) {
-	currentLogKey := getLogKey()
-	if currentLogKey == "" {
-		return
-	}
-
-	f, err := os.OpenFile(logDir, os.O_RDONLY, os.ModeDir)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	fileList, _ := f.Readdir(-1)
-	for _, v := range fileList {
-		if !v.IsDir() && strings.HasPrefix(v.Name(), currentLogKey) && strings.HasSuffix(v.Name(), logPathDelimiter+"log") {
-			todayDate := time.Now().Format(Consts.DateDF)
-			createDate := getLogFileCreateDate(v.Name())
-			if len(createDate) == 0 || todayDate == createDate {
-				continue
-			}
-			moveToName := logDir + "/log" + createDate
-			if !makeLogSubDir(moveToName) {
-				continue
-			}
-			os.Rename(logDir+"/"+v.Name(), moveToName+"/"+v.Name())
-		}
-	}
-}
-
-func cleanOldLogFiles(logDir string) {
-	f, err := os.OpenFile(logDir, os.O_RDONLY, os.ModeDir)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	now := time.Now()
-	// task run enabled
-	unlinkStopPoint := now.AddDate(0, 0, (-1)*keepLogDays)
-	cleanMaxDate := unlinkStopPoint.Format(Consts.DateDF)
-	fileList, _ := f.Readdir(-1)
-	for _, v := range fileList {
-		objectName := v.Name()
-		if v.IsDir() && strings.HasPrefix(objectName, "log") {
-			logDate := objectName[3:]
-			if len(logDate) != 8 {
-				continue
-			}
-			if logDate >= cleanMaxDate {
-				continue
-			}
-			oldMothDirClean := logDir + "/" + objectName
-			if len(objectName) > 0 && strings.HasSuffix(oldMothDirClean, objectName) {
-				Criticalf("CLEAN OLD LOG[%s] DIR[%s] OBJECT[%s] KEEPDAYS[%d]\n",
-					logDate, oldMothDirClean, objectName, keepLogDays)
-				os.RemoveAll(oldMothDirClean)
-			}
-		}
-	}
-}
-
-func ArchiveLogFiles() {
-	time.Sleep(5 * time.Second)
-	for getLogKey() == "" {
-		time.Sleep(time.Second)
-	}
-	logDir := os.Getenv("HOME") + "/log"
-	Criticalf("Old Log Dir Keep Month : %d, LogKey: %s\n", keepLogDays, getLogKey())
-
-	for {
-		moveOldLogFiles(logDir)
-		cleanOldLogFiles(logDir)
-		time.Sleep(10 * time.Second)
-	}
 }
 
 func IsDirExisting(dir string) (bool, error) {

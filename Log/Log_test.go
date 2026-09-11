@@ -2,6 +2,7 @@ package Log
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,17 +14,24 @@ func newTestBufferedLogWriter(t *testing.T, logKey string) *BufferedLogWriter {
 }
 
 func testBufferLen(writer *BufferedLogWriter) int {
-	writer.bufferMutex.Lock()
-	defer writer.bufferMutex.Unlock()
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
 
 	return writer.buffer.Len()
 }
 
 func testResetBuffer(writer *BufferedLogWriter) {
-	writer.bufferMutex.Lock()
-	defer writer.bufferMutex.Unlock()
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
 
 	writer.buffer.Reset()
+}
+
+func testFillBuffer(writer *BufferedLogWriter, data []byte) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+
+	writer.buffer.Write(data)
 }
 
 func TestLogOut(t *testing.T) {
@@ -82,17 +90,13 @@ func TestForceFlush(t *testing.T) {
 		if writer == nil {
 			t.Fatal("bufferLogWriter should not be nil after SetOutput")
 		}
-		writer.bufferMutex.Lock()
-		flushForce := writer.flushForce
-		writer.bufferMutex.Unlock()
+		flushForce := writer.isForceFlush()
 		if !flushForce {
 			t.Errorf("Expected global flushForce to be true")
 		}
 
 		ForceFlush(false)
-		writer.bufferMutex.Lock()
-		flushForce = writer.flushForce
-		writer.bufferMutex.Unlock()
+		flushForce = writer.isForceFlush()
 		if flushForce {
 			t.Errorf("Expected global flushForce to be false")
 		}
@@ -166,7 +170,7 @@ func TestBufferedLogWriter_Write(t *testing.T) {
 		testWriter.forceFlush(false)
 
 		fillData := []byte(strings.Repeat("x", MaxBufferedLogFileSize))
-		testWriter.buffer.Write(fillData)
+		testFillBuffer(testWriter, fillData)
 
 		additionalData := []byte("overflow\n")
 		_, err := testWriter.Write(additionalData)
@@ -220,9 +224,7 @@ func TestBufferedLogWriter_WriteFile(t *testing.T) {
 		testContent := []byte("direct write file test\n")
 		writer.writeFile(testContent)
 
-		if writer.fileHandle != nil {
-			writer.fileHandle.Sync()
-		}
+		writer.flush()
 	})
 
 	t.Run("WriteFile_EmptyBytes", func(t *testing.T) {
@@ -248,7 +250,7 @@ func TestBufferedLogWriter_FileRotation(t *testing.T) {
 		if writer.fileName == "" {
 			t.Error("Expected fileName to be set after rotation check")
 		}
-		if writer.fileHandle == nil {
+		if !writer.isFileOpen() {
 			t.Error("Expected fileHandle to be created")
 		}
 		if prevFile != "" {
@@ -275,13 +277,13 @@ func TestBufferedLogWriter_Close(t *testing.T) {
 	writer.CheckLogDirExists("test_close")
 	writer.CheckLogFileRotation()
 
-	if writer.fileHandle == nil {
+	if !writer.isFileOpen() {
 		t.Fatal("Expected fileHandle to be created")
 	}
 
 	writer.Close()
 
-	if writer.fileHandle != nil {
+	if writer.isFileOpen() {
 		t.Error("Expected fileHandle to be nil after Close")
 	}
 
@@ -317,6 +319,11 @@ func TestGetLogFileCreateDate(t *testing.T) {
 		{
 			name:     "ValidLogFile_MultipleDelimiters",
 			fileName: "app.service.20240105.log",
+			expected: "20240105",
+		},
+		{
+			name:     "ValidRollingLogFile",
+			fileName: "app_20240105_120305_001.log",
 			expected: "20240105",
 		},
 	}
@@ -368,12 +375,10 @@ func TestSetOutputAndCloseOutput(t *testing.T) {
 		if writer == nil {
 			t.Fatal("Expected bufferLogWriter to be initialized")
 		}
+		Criticalf("test log message")
 		if writer.getFileName() == "" {
 			t.Error("Expected fileName to be set")
 		}
-
-		Criticalf("test log message")
-		time.Sleep(100 * time.Millisecond)
 	})
 
 	t.Run("CloseOutput_CleansUp", func(t *testing.T) {
@@ -381,4 +386,103 @@ func TestSetOutputAndCloseOutput(t *testing.T) {
 		CloseOutput()
 		time.Sleep(200 * time.Millisecond)
 	})
+}
+
+func TestBufferedLogWriter_RollingBySizeAndMaxBackups(t *testing.T) {
+	logDir := t.TempDir()
+	writer := newBufferedLogWriter(RollingLogConfig{
+		Dir:           logDir,
+		LogKey:        "test_rolling",
+		MaxFileSize:   16,
+		MaxBackups:    2,
+		FlushInterval: time.Hour,
+		BufferSize:    1,
+	})
+
+	for i := 0; i < 4; i++ {
+		if _, err := writer.Write([]byte("0123456789abcdef\n")); err != nil {
+			t.Fatalf("Write failed: %v", err)
+		}
+	}
+	writer.Close()
+
+	matches, err := filepath.Glob(filepath.Join(logDir, "test_rolling_*.log"))
+	if err != nil {
+		t.Fatalf("Glob failed: %v", err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("Expected max 2 log backups, got %d: %+v", len(matches), matches)
+	}
+	for _, name := range matches {
+		if getLogFileCreateDate(filepath.Base(name)) == "" {
+			t.Fatalf("Expected rolling log filename to include date: %s", name)
+		}
+	}
+}
+
+func TestBufferedLogWriter_RecreatesRemovedCurrentLogFile(t *testing.T) {
+	logDir := t.TempDir()
+	writer := newBufferedLogWriter(RollingLogConfig{
+		Dir:           logDir,
+		LogKey:        "test_removed",
+		MaxFileSize:   1024,
+		MaxBackups:    10,
+		FlushInterval: time.Hour,
+		BufferSize:    1,
+	})
+	defer writer.Close()
+
+	first := []byte("first log line\n")
+	if _, err := writer.Write(first); err != nil {
+		t.Fatalf("first Write failed: %v", err)
+	}
+	removedFile := writer.getFileName()
+	if removedFile == "" {
+		t.Fatal("expected first write to create log file")
+	}
+	if err := os.Remove(removedFile); err != nil {
+		t.Fatalf("Remove failed: %v", err)
+	}
+
+	second := []byte("second log line\n")
+	if _, err := writer.Write(second); err != nil {
+		t.Fatalf("second Write failed: %v", err)
+	}
+	recreatedFile := writer.getFileName()
+	if recreatedFile == "" {
+		t.Fatal("expected second write to recreate log file")
+	}
+	if _, err := os.Stat(recreatedFile); err != nil {
+		t.Fatalf("expected recreated log file to exist: %v", err)
+	}
+
+	writer.mu.Lock()
+	currentSize := writer.currentSize
+	writer.mu.Unlock()
+	if currentSize != int64(len(second)) {
+		t.Fatalf("expected currentSize to reset to %d, got %d", len(second), currentSize)
+	}
+}
+
+func TestCloseOutput_FlushesBufferedLogs(t *testing.T) {
+	logDir := t.TempDir()
+	setOutput("test_close_flush", logDir)
+	ForceFlush(false)
+	Infof("buffered close flush")
+	CloseOutput()
+
+	matches, err := filepath.Glob(filepath.Join(logDir, "test_close_flush_*.log"))
+	if err != nil {
+		t.Fatalf("Glob failed: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("Expected one flushed log file, got %d", len(matches))
+	}
+	data, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if !strings.Contains(string(data), "buffered close flush") {
+		t.Fatalf("Expected CloseOutput to flush buffered log, got: %s", string(data))
+	}
 }

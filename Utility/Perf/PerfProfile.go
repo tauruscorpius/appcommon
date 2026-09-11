@@ -46,29 +46,30 @@ func (t *PerfProfServer) start(addr string) error {
 		return errors.New("server already started @" + profServer.addr + " id : " + t.id)
 	}
 
-	t.id = UUID.GetUid()
-	t.server = &http.Server{Addr: addr}
+	id := UUID.GetUid()
+	server := &http.Server{Addr: addr}
+
+	t.id = id
+	t.server = server
 	t.addr = addr
 
 	go func(server *http.Server) {
-		id := t.id
-		Log.Criticalf("Starting pprof server on %s, id : %s\n", t.addr, id)
+		Log.Criticalf("Starting pprof server on %s, id : %s\n", addr, id)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			Log.Errorf("pprof server failed: %s, id : %s", err, id)
 		}
-		Log.Criticalf("Exiting pprof server on %s, id : %s\n", t.addr, id)
-		t.stop(false)
-	}(t.server)
+		Log.Criticalf("Exiting pprof server on %s, id : %s\n", addr, id)
+		t.stopCurrent(false, id)
+	}(server)
 
 	go func() {
-		id := t.id
 		start := time.Now()
-		Log.Criticalf("Start Timing pprof server on %s, it will be automatic closed after 12 hour, id : %s.\n", t.addr, id)
-		for t.server != nil && time.Since(start) < 12*time.Hour {
+		Log.Criticalf("Start Timing pprof server on %s, it will be automatic closed after 12 hour, id : %s.\n", addr, id)
+		for t.isRunning(id) && time.Since(start) < 12*time.Hour {
 			time.Sleep(time.Second)
 		}
-		Log.Criticalf("Exit timing pprof server on %s, id : %s.\n", t.addr, id)
-		t.stop(true)
+		Log.Criticalf("Exit timing pprof server on %s, id : %s.\n", addr, id)
+		t.stopCurrent(true, id)
 	}()
 
 	return nil
@@ -86,8 +87,23 @@ func (t *PerfProfServer) check() string {
 }
 
 func (t *PerfProfServer) stop(stop bool) error {
+	return t.stopCurrent(stop, "")
+}
+
+func (t *PerfProfServer) isRunning(id string) bool {
 	t.rw.Lock()
 	defer t.rw.Unlock()
+
+	return t.server != nil && (id == "" || t.id == id)
+}
+
+func (t *PerfProfServer) stopCurrent(stop bool, id string) error {
+	t.rw.Lock()
+	defer t.rw.Unlock()
+
+	if id != "" && t.id != id {
+		return nil
+	}
 
 	if stop {
 		if t.server != nil {
