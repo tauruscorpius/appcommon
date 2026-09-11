@@ -21,6 +21,7 @@ const (
 	defaultLogBufferSize         = 1024 * 1024
 	MaxBufferedLogFileSize       = 50 * 1024 * 1024
 	WriteLogFileSize             = defaultLogBufferSize
+	maxRollingLogSequence        = 99999
 )
 
 type RollingLogConfig struct {
@@ -45,7 +46,7 @@ type BufferedLogWriter struct {
 	fileHandle  *os.File
 	fileName    string
 	activeDate  string
-	sequence    int
+	sequence    uint64
 	currentSize int64
 	flushForce  bool
 	closed      bool
@@ -300,6 +301,9 @@ func (b *BufferedLogWriter) rotateLocked(now time.Time) error {
 		b.activeDate = today
 		b.sequence = b.maxSequenceForDateLocked(today)
 	}
+	if b.sequence >= maxRollingLogSequence {
+		b.sequence = 0
+	}
 	b.sequence++
 
 	fileName := b.buildLogFileName(now, b.sequence)
@@ -312,8 +316,8 @@ func (b *BufferedLogWriter) rotateLocked(now time.Time) error {
 	return nil
 }
 
-func (b *BufferedLogWriter) buildLogFileName(now time.Time, sequence int) string {
-	return fmt.Sprintf("%s_%s_%s_%03d.log", b.cfg.LogKey, now.Format(Consts.DateDF), now.Format("150405"), sequence)
+func (b *BufferedLogWriter) buildLogFileName(now time.Time, sequence uint64) string {
+	return fmt.Sprintf("%s_%s_%s_%05d.log", b.cfg.LogKey, now.Format(Consts.DateDF), now.Format("150405"), sequence)
 }
 
 func (b *BufferedLogWriter) createLogFileLocked(fileName string) error {
@@ -466,9 +470,9 @@ func (b *BufferedLogWriter) cleanBackupsLocked() {
 	}
 }
 
-func (b *BufferedLogWriter) maxSequenceForDateLocked(date string) int {
+func (b *BufferedLogWriter) maxSequenceForDateLocked(date string) uint64 {
 	files := b.logFilesLocked()
-	maxSeq := 0
+	var maxSeq uint64
 	for _, file := range files {
 		parsedDate, seq, ok := b.parseRollingLogFile(file.Name())
 		if ok && parsedDate == date && seq > maxSeq {
@@ -483,20 +487,20 @@ func (b *BufferedLogWriter) isRollingLogFile(fileName string) bool {
 	return ok
 }
 
-func (b *BufferedLogWriter) parseRollingLogFile(fileName string) (string, int, bool) {
+func (b *BufferedLogWriter) parseRollingLogFile(fileName string) (string, uint64, bool) {
 	prefix := b.cfg.LogKey + "_"
 	if !strings.HasPrefix(fileName, prefix) || !strings.HasSuffix(fileName, ".log") {
 		return "", 0, false
 	}
 	body := strings.TrimSuffix(strings.TrimPrefix(fileName, prefix), ".log")
 	parts := strings.Split(body, "_")
-	if len(parts) != 3 || len(parts[0]) != 8 || len(parts[1]) != 6 || len(parts[2]) != 3 {
+	if len(parts) != 3 || len(parts[0]) != 8 || len(parts[1]) != 6 || len(parts[2]) != 5 {
 		return "", 0, false
 	}
 	if _, err := time.Parse("20060102_150405", parts[0]+"_"+parts[1]); err != nil {
 		return "", 0, false
 	}
-	seq, err := strconv.Atoi(parts[2])
+	seq, err := strconv.ParseUint(parts[2], 10, 64)
 	if err != nil {
 		return "", 0, false
 	}

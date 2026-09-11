@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tauruscorpius/appcommon/Consts"
 )
 
 func newTestBufferedLogWriter(t *testing.T, logKey string) *BufferedLogWriter {
@@ -417,6 +419,79 @@ func TestBufferedLogWriter_RollingBySizeAndMaxBackups(t *testing.T) {
 		if getLogFileCreateDate(filepath.Base(name)) == "" {
 			t.Fatalf("Expected rolling log filename to include date: %s", name)
 		}
+	}
+}
+
+func TestBufferedLogWriter_SequenceResetsPerDayAndUsesFiveDigits(t *testing.T) {
+	logDir := t.TempDir()
+	writer := newBufferedLogWriter(RollingLogConfig{
+		Dir:           logDir,
+		LogKey:        "test_sequence",
+		MaxFileSize:   16,
+		MaxBackups:    10,
+		FlushInterval: time.Hour,
+		BufferSize:    1,
+	})
+	defer writer.Close()
+
+	firstDay := time.Date(2026, 9, 11, 10, 0, 0, 0, time.Local)
+	if err := writer.rotateLocked(firstDay); err != nil {
+		t.Fatalf("first day first rotate failed: %v", err)
+	}
+	if !strings.HasSuffix(writer.getFileName(), "_00001.log") {
+		t.Fatalf("expected first sequence to use five digits, got %s", writer.getFileName())
+	}
+	if err := writer.rotateLocked(firstDay.Add(time.Second)); err != nil {
+		t.Fatalf("first day second rotate failed: %v", err)
+	}
+	if !strings.HasSuffix(writer.getFileName(), "_00002.log") {
+		t.Fatalf("expected same-day sequence to increment, got %s", writer.getFileName())
+	}
+
+	secondDay := firstDay.AddDate(0, 0, 1)
+	if err := writer.rotateLocked(secondDay); err != nil {
+		t.Fatalf("second day rotate failed: %v", err)
+	}
+	if !strings.HasSuffix(writer.getFileName(), "_00001.log") {
+		t.Fatalf("expected next-day sequence to reset, got %s", writer.getFileName())
+	}
+
+	if _, _, ok := writer.parseRollingLogFile("test_sequence_20260911_100000_001.log"); ok {
+		t.Fatal("expected three-digit sequence log filename to be invalid")
+	}
+	if _, _, ok := writer.parseRollingLogFile("test_sequence_20260911_100000_00001.log"); !ok {
+		t.Fatal("expected five-digit sequence log filename to be valid")
+	}
+}
+
+func TestBufferedLogWriter_SequenceWrapsAfterFiveDigitLimit(t *testing.T) {
+	logDir := t.TempDir()
+	writer := newBufferedLogWriter(RollingLogConfig{
+		Dir:           logDir,
+		LogKey:        "test_sequence_wrap",
+		MaxFileSize:   16,
+		MaxBackups:    10,
+		FlushInterval: time.Hour,
+		BufferSize:    1,
+	})
+	defer writer.Close()
+
+	now := time.Date(2026, 9, 11, 10, 0, 0, 0, time.Local)
+	writer.activeDate = now.Format(Consts.DateDF)
+	writer.sequence = maxRollingLogSequence - 1
+
+	if err := writer.rotateLocked(now); err != nil {
+		t.Fatalf("rotate to max sequence failed: %v", err)
+	}
+	if !strings.HasSuffix(writer.getFileName(), "_99999.log") {
+		t.Fatalf("expected sequence to reach five-digit limit, got %s", writer.getFileName())
+	}
+
+	if err := writer.rotateLocked(now.Add(time.Second)); err != nil {
+		t.Fatalf("rotate after max sequence failed: %v", err)
+	}
+	if !strings.HasSuffix(writer.getFileName(), "_00001.log") {
+		t.Fatalf("expected sequence to wrap to 00001, got %s", writer.getFileName())
 	}
 }
 
