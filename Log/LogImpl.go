@@ -164,7 +164,10 @@ func (b *BufferedLogWriter) Close() {
 	if err := b.flushLocked(); err != nil {
 		fmt.Printf("flush log on close error : %v\n", err)
 	}
-	b.closeFileLocked()
+	if err := b.archiveCurrentLogFileLocked(); err != nil {
+		fmt.Printf("archive log on close error : %v\n", err)
+	}
+	b.cleanBackupsLocked()
 	b.closed = true
 	b.closeDone()
 }
@@ -390,7 +393,10 @@ func (b *BufferedLogWriter) autoFlush() {
 			if err := b.flushLocked(); err != nil {
 				fmt.Printf("flush log on close error : %v\n", err)
 			}
-			b.closeFileLocked()
+			if err := b.archiveCurrentLogFileLocked(); err != nil {
+				fmt.Printf("archive log on close error : %v\n", err)
+			}
+			b.cleanBackupsLocked()
 			b.closed = true
 			b.mu.Unlock()
 			return

@@ -448,6 +448,43 @@ func TestBufferedLogWriter_CurrentLogFileUsesDatedTimeName(t *testing.T) {
 	}
 }
 
+func TestBufferedLogWriter_DoesNotArchiveOrphanCurrentLogFileOnStart(t *testing.T) {
+	logDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(logDir, "test_orphan_20260911_151929_00019.log"), []byte("archive"), 0666); err != nil {
+		t.Fatalf("write seed archive failed: %v", err)
+	}
+	orphanName := filepath.Join(logDir, "test_orphan_20260911_151952.log")
+	if err := os.WriteFile(orphanName, []byte("orphan current"), 0666); err != nil {
+		t.Fatalf("write orphan current failed: %v", err)
+	}
+
+	writer := newBufferedLogWriter(RollingLogConfig{
+		Dir:           logDir,
+		LogKey:        "test_orphan",
+		MaxFileSize:   1024,
+		MaxBackups:    10,
+		FlushInterval: time.Hour,
+		BufferSize:    1,
+	})
+	defer writer.Close()
+
+	now := time.Date(2026, 9, 11, 15, 23, 21, 0, time.Local)
+	if err := writer.rotateLocked(now); err != nil {
+		t.Fatalf("rotate failed: %v", err)
+	}
+	if _, err := os.Stat(orphanName); err != nil {
+		t.Fatalf("expected startup to leave orphan current log untouched: %v", err)
+	}
+	archivedName := filepath.Join(logDir, "test_orphan_20260911_151952_00020.log")
+	if _, err := os.Stat(archivedName); !os.IsNotExist(err) {
+		t.Fatalf("expected startup not to archive orphan current log, stat err: %v", err)
+	}
+	currentName := filepath.Join(logDir, "test_orphan_20260911_152321.log")
+	if writer.getFileName() != currentName {
+		t.Fatalf("expected new current log file %s, got %s", currentName, writer.getFileName())
+	}
+}
+
 func TestBufferedLogWriter_SequenceResetsPerDayAndUsesFiveDigits(t *testing.T) {
 	logDir := t.TempDir()
 	writer := newBufferedLogWriter(RollingLogConfig{
@@ -583,7 +620,10 @@ func TestCloseOutput_FlushesBufferedLogs(t *testing.T) {
 		t.Fatalf("Glob failed: %v", err)
 	}
 	if len(matches) != 1 {
-		t.Fatalf("Expected one flushed current log file, got %d: %+v", len(matches), matches)
+		t.Fatalf("Expected one flushed archive log file, got %d: %+v", len(matches), matches)
+	}
+	if _, _, ok := getBufferedLogWriter().parseRollingLogFile(filepath.Base(matches[0])); !ok {
+		t.Fatalf("Expected CloseOutput to archive current log file, got %s", matches[0])
 	}
 	data, err := os.ReadFile(matches[0])
 	if err != nil {
