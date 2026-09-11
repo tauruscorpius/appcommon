@@ -1,6 +1,9 @@
 package AppCommon
 
 import (
+	"runtime"
+	"strconv"
+
 	"github.com/tauruscorpius/appcommon/ApiService"
 	"github.com/tauruscorpius/appcommon/Log"
 	"github.com/tauruscorpius/appcommon/Lookup"
@@ -9,8 +12,6 @@ import (
 	"github.com/tauruscorpius/appcommon/Lookup/LookupDS"
 	"github.com/tauruscorpius/appcommon/Lookup/LookupHook"
 	"github.com/tauruscorpius/appcommon/Utility/Stack"
-	"runtime"
-	"strconv"
 )
 
 // hooks check
@@ -19,15 +20,16 @@ import (
 // update notify
 // ... (Service's)
 
+func ParseArgs() bool {
+	lookUpArgs := LookupArgs.GetLookupAppArgs()
+	return lookUpArgs.ProcessAppArgs()
+}
+
 func BootInit(nodeType LookupConsts.ServiceNodeType, rollingLogConfig ...*Log.RollingLogConfig) bool {
 	lookUpClient := Lookup.GetNodeLookupClient()
 	lookUpArgs := LookupArgs.GetLookupAppArgs()
 
 	lookUpArgs.SetServiceNodeType(nodeType)
-	if suc := lookUpArgs.ProcessAppArgs(); !suc {
-		return false
-	}
-
 	defaultLogKey := string(nodeType) + "." + lookUpArgs.Identifier
 	if len(rollingLogConfig) > 0 && rollingLogConfig[0] != nil {
 		cfg := *rollingLogConfig[0]
