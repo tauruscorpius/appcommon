@@ -46,6 +46,7 @@ type BufferedLogWriter struct {
 	fileHandle  *os.File
 	fileName    string
 	activeDate  string
+	activeSince time.Time
 	sequence    uint64
 	currentSize int64
 	flushForce  bool
@@ -296,28 +297,52 @@ func (b *BufferedLogWriter) rotateLocked(now time.Time) error {
 	if err := os.MkdirAll(b.cfg.Dir, 0777); err != nil {
 		return err
 	}
-	today := now.Format(Consts.DateDF)
-	if b.activeDate != today {
-		b.activeDate = today
-		b.sequence = b.maxSequenceForDateLocked(today)
-	}
-	if b.sequence >= maxRollingLogSequence {
-		b.sequence = 0
-	}
-	b.sequence++
-
-	fileName := b.buildLogFileName(now, b.sequence)
-	if err := b.createLogFileLocked(filepath.Join(b.cfg.Dir, fileName)); err != nil {
+	if err := b.archiveCurrentLogFileLocked(); err != nil {
 		return err
 	}
-	b.fileName = filepath.Join(b.cfg.Dir, fileName)
+
+	fileName := b.currentLogFileName(now)
+	if err := b.createLogFileLocked(fileName); err != nil {
+		return err
+	}
+	b.fileName = fileName
+	b.activeDate = now.Format(Consts.DateDF)
+	b.activeSince = now
 	b.currentSize = 0
 	b.cleanBackupsLocked()
 	return nil
 }
 
-func (b *BufferedLogWriter) buildLogFileName(now time.Time, sequence uint64) string {
+func (b *BufferedLogWriter) currentLogFileName(now time.Time) string {
+	return filepath.Join(b.cfg.Dir, fmt.Sprintf("%s_%s_%s.log", b.cfg.LogKey, now.Format(Consts.DateDF), now.Format("150405")))
+}
+
+func (b *BufferedLogWriter) buildArchiveLogFileName(now time.Time, sequence uint64) string {
 	return fmt.Sprintf("%s_%s_%s_%05d.log", b.cfg.LogKey, now.Format(Consts.DateDF), now.Format("150405"), sequence)
+}
+
+func (b *BufferedLogWriter) archiveCurrentLogFileLocked() error {
+	if b.fileHandle == nil || b.fileName == "" {
+		return nil
+	}
+	archiveTime := b.activeSince
+	if archiveTime.IsZero() {
+		archiveTime = time.Now()
+	}
+	b.closeFileLocked()
+
+	if _, err := os.Stat(b.fileName); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	archiveDate := archiveTime.Format(Consts.DateDF)
+	sequence := b.nextSequenceForDateLocked(archiveDate)
+	b.sequence = sequence
+	archiveName := b.buildArchiveLogFileName(archiveTime, sequence)
+	return os.Rename(b.fileName, filepath.Join(b.cfg.Dir, archiveName))
 }
 
 func (b *BufferedLogWriter) createLogFileLocked(fileName string) error {
@@ -480,6 +505,14 @@ func (b *BufferedLogWriter) maxSequenceForDateLocked(date string) uint64 {
 		}
 	}
 	return maxSeq
+}
+
+func (b *BufferedLogWriter) nextSequenceForDateLocked(date string) uint64 {
+	sequence := b.maxSequenceForDateLocked(date)
+	if sequence >= maxRollingLogSequence {
+		return 1
+	}
+	return sequence + 1
 }
 
 func (b *BufferedLogWriter) isRollingLogFile(fileName string) bool {

@@ -3,11 +3,10 @@ package Log
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/tauruscorpius/appcommon/Consts"
 )
 
 func newTestBufferedLogWriter(t *testing.T, logKey string) *BufferedLogWriter {
@@ -412,13 +411,40 @@ func TestBufferedLogWriter_RollingBySizeAndMaxBackups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Glob failed: %v", err)
 	}
-	if len(matches) != 2 {
-		t.Fatalf("Expected max 2 log backups, got %d: %+v", len(matches), matches)
-	}
+	var archiveMatches []string
 	for _, name := range matches {
+		if _, _, ok := writer.parseRollingLogFile(filepath.Base(name)); ok {
+			archiveMatches = append(archiveMatches, name)
+		}
+	}
+	if len(archiveMatches) != 2 {
+		t.Fatalf("Expected max 2 log backups, got %d: %+v", len(archiveMatches), archiveMatches)
+	}
+	for _, name := range archiveMatches {
 		if getLogFileCreateDate(filepath.Base(name)) == "" {
 			t.Fatalf("Expected rolling log filename to include date: %s", name)
 		}
+	}
+}
+
+func TestBufferedLogWriter_CurrentLogFileUsesDatedTimeName(t *testing.T) {
+	logDir := t.TempDir()
+	writer := newBufferedLogWriter(RollingLogConfig{
+		Dir:           logDir,
+		LogKey:        "test_current",
+		MaxFileSize:   16,
+		MaxBackups:    10,
+		FlushInterval: time.Hour,
+		BufferSize:    1,
+	})
+	defer writer.Close()
+
+	if _, err := writer.Write([]byte("current log line\n")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	pattern := regexp.MustCompile(`^test_current_\d{8}_\d{6}\.log$`)
+	if !pattern.MatchString(filepath.Base(writer.getFileName())) {
+		t.Fatalf("expected current log file to use dated time name, got %s", writer.getFileName())
 	}
 }
 
@@ -438,22 +464,25 @@ func TestBufferedLogWriter_SequenceResetsPerDayAndUsesFiveDigits(t *testing.T) {
 	if err := writer.rotateLocked(firstDay); err != nil {
 		t.Fatalf("first day first rotate failed: %v", err)
 	}
-	if !strings.HasSuffix(writer.getFileName(), "_00001.log") {
-		t.Fatalf("expected first sequence to use five digits, got %s", writer.getFileName())
-	}
 	if err := writer.rotateLocked(firstDay.Add(time.Second)); err != nil {
 		t.Fatalf("first day second rotate failed: %v", err)
 	}
-	if !strings.HasSuffix(writer.getFileName(), "_00002.log") {
-		t.Fatalf("expected same-day sequence to increment, got %s", writer.getFileName())
+	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_20260911_100000_00001.log")); err != nil {
+		t.Fatalf("expected first archived sequence to use five digits: %v", err)
 	}
 
 	secondDay := firstDay.AddDate(0, 0, 1)
 	if err := writer.rotateLocked(secondDay); err != nil {
 		t.Fatalf("second day rotate failed: %v", err)
 	}
-	if !strings.HasSuffix(writer.getFileName(), "_00001.log") {
-		t.Fatalf("expected next-day sequence to reset, got %s", writer.getFileName())
+	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_20260911_100001_00002.log")); err != nil {
+		t.Fatalf("expected same-day sequence to increment: %v", err)
+	}
+	if err := writer.rotateLocked(secondDay.Add(time.Second)); err != nil {
+		t.Fatalf("second day archive rotate failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_20260912_100000_00001.log")); err != nil {
+		t.Fatalf("expected next-day sequence to reset: %v", err)
 	}
 
 	if _, _, ok := writer.parseRollingLogFile("test_sequence_20260911_100000_001.log"); ok {
@@ -477,21 +506,24 @@ func TestBufferedLogWriter_SequenceWrapsAfterFiveDigitLimit(t *testing.T) {
 	defer writer.Close()
 
 	now := time.Date(2026, 9, 11, 10, 0, 0, 0, time.Local)
-	writer.activeDate = now.Format(Consts.DateDF)
-	writer.sequence = maxRollingLogSequence - 1
-
+	if err := os.WriteFile(filepath.Join(logDir, "test_sequence_wrap_20260911_095959_99998.log"), []byte("old"), 0666); err != nil {
+		t.Fatalf("write seed archive failed: %v", err)
+	}
 	if err := writer.rotateLocked(now); err != nil {
+		t.Fatalf("initial rotate failed: %v", err)
+	}
+	if err := writer.rotateLocked(now.Add(time.Second)); err != nil {
 		t.Fatalf("rotate to max sequence failed: %v", err)
 	}
-	if !strings.HasSuffix(writer.getFileName(), "_99999.log") {
-		t.Fatalf("expected sequence to reach five-digit limit, got %s", writer.getFileName())
+	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_wrap_20260911_100000_99999.log")); err != nil {
+		t.Fatalf("expected sequence to reach five-digit limit: %v", err)
 	}
 
-	if err := writer.rotateLocked(now.Add(time.Second)); err != nil {
+	if err := writer.rotateLocked(now.Add(2 * time.Second)); err != nil {
 		t.Fatalf("rotate after max sequence failed: %v", err)
 	}
-	if !strings.HasSuffix(writer.getFileName(), "_00001.log") {
-		t.Fatalf("expected sequence to wrap to 00001, got %s", writer.getFileName())
+	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_wrap_20260911_100001_00001.log")); err != nil {
+		t.Fatalf("expected sequence to wrap to 00001: %v", err)
 	}
 }
 
@@ -551,7 +583,7 @@ func TestCloseOutput_FlushesBufferedLogs(t *testing.T) {
 		t.Fatalf("Glob failed: %v", err)
 	}
 	if len(matches) != 1 {
-		t.Fatalf("Expected one flushed log file, got %d", len(matches))
+		t.Fatalf("Expected one flushed current log file, got %d: %+v", len(matches), matches)
 	}
 	data, err := os.ReadFile(matches[0])
 	if err != nil {
