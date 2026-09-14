@@ -3,7 +3,7 @@ package Log
 import (
 	"os"
 	"path/filepath"
-	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -323,9 +323,9 @@ func TestGetLogFileCreateDate(t *testing.T) {
 			expected: "20240105",
 		},
 		{
-			name:     "ValidRollingLogFile",
-			fileName: "app_20240105_120305_001.log",
-			expected: "20240105",
+			name:     "RollingLogFileWithoutDate",
+			fileName: "app_1788938180_00001.log",
+			expected: "",
 		},
 	}
 
@@ -394,14 +394,14 @@ func TestBufferedLogWriter_RollingBySizeAndMaxBackups(t *testing.T) {
 	writer := newBufferedLogWriter(RollingLogConfig{
 		Dir:           logDir,
 		LogKey:        "test_rolling",
-		MaxFileSize:   16,
+		MaxFileSize:   120,
 		MaxBackups:    2,
 		FlushInterval: time.Hour,
 		BufferSize:    1,
 	})
 
-	for i := 0; i < 4; i++ {
-		if _, err := writer.Write([]byte("0123456789abcdef\n")); err != nil {
+	for i := 0; i < 5; i++ {
+		if _, err := writer.Write([]byte(strings.Repeat("x", 80) + "\n")); err != nil {
 			t.Fatalf("Write failed: %v", err)
 		}
 	}
@@ -420,14 +420,59 @@ func TestBufferedLogWriter_RollingBySizeAndMaxBackups(t *testing.T) {
 	if len(archiveMatches) != 2 {
 		t.Fatalf("Expected max 2 log backups, got %d: %+v", len(archiveMatches), archiveMatches)
 	}
-	for _, name := range archiveMatches {
-		if getLogFileCreateDate(filepath.Base(name)) == "" {
-			t.Fatalf("Expected rolling log filename to include date: %s", name)
-		}
-	}
 }
 
-func TestBufferedLogWriter_CurrentLogFileUsesDatedTimeName(t *testing.T) {
+func TestBufferedLogWriter_CleanBackupsByMaxAge(t *testing.T) {
+	t.Run("MaxAgeDisabledByDefault", func(t *testing.T) {
+		logDir := t.TempDir()
+		writer := newBufferedLogWriter(RollingLogConfig{
+			Dir:           logDir,
+			LogKey:        "test_age_default",
+			MaxBackups:    10,
+			FlushInterval: time.Hour,
+			BufferSize:    1,
+		})
+		oldFile := filepath.Join(logDir, "test_age_default_"+strconv.FormatInt(time.Now().AddDate(0, 0, -10).Unix(), 10)+"_00001.log")
+		if err := os.WriteFile(oldFile, []byte("old"), 0666); err != nil {
+			t.Fatalf("write old archive failed: %v", err)
+		}
+
+		writer.cleanBackupsLocked()
+		if _, err := os.Stat(oldFile); err != nil {
+			t.Fatalf("expected default MaxAge to keep old archive: %v", err)
+		}
+	})
+
+	t.Run("DeletesExpiredArchives", func(t *testing.T) {
+		logDir := t.TempDir()
+		writer := newBufferedLogWriter(RollingLogConfig{
+			Dir:           logDir,
+			LogKey:        "test_age",
+			MaxBackups:    10,
+			MaxAge:        1,
+			FlushInterval: time.Hour,
+			BufferSize:    1,
+		})
+		oldFile := filepath.Join(logDir, "test_age_"+strconv.FormatInt(time.Now().AddDate(0, 0, -2).Unix(), 10)+"_00001.log")
+		recentFile := filepath.Join(logDir, "test_age_"+strconv.FormatInt(time.Now().Unix(), 10)+"_00001.log")
+		if err := os.WriteFile(oldFile, []byte("old"), 0666); err != nil {
+			t.Fatalf("write old archive failed: %v", err)
+		}
+		if err := os.WriteFile(recentFile, []byte("recent"), 0666); err != nil {
+			t.Fatalf("write recent archive failed: %v", err)
+		}
+
+		writer.cleanBackupsLocked()
+		if _, err := os.Stat(oldFile); !os.IsNotExist(err) {
+			t.Fatalf("expected MaxAge to delete old archive, stat err: %v", err)
+		}
+		if _, err := os.Stat(recentFile); err != nil {
+			t.Fatalf("expected MaxAge to keep recent archive: %v", err)
+		}
+	})
+}
+
+func TestBufferedLogWriter_CurrentLogFileUsesFixedName(t *testing.T) {
 	logDir := t.TempDir()
 	writer := newBufferedLogWriter(RollingLogConfig{
 		Dir:           logDir,
@@ -442,18 +487,44 @@ func TestBufferedLogWriter_CurrentLogFileUsesDatedTimeName(t *testing.T) {
 	if _, err := writer.Write([]byte("current log line\n")); err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
-	pattern := regexp.MustCompile(`^test_current_\d{8}_\d{6}\.log$`)
-	if !pattern.MatchString(filepath.Base(writer.getFileName())) {
-		t.Fatalf("expected current log file to use dated time name, got %s", writer.getFileName())
+	expected := filepath.Join(logDir, "test_current.log")
+	if writer.getFileName() != expected {
+		t.Fatalf("expected current log file to use fixed name %s, got %s", expected, writer.getFileName())
+	}
+}
+
+func TestBufferedLogWriter_NewCurrentLogFileWritesPidHeader(t *testing.T) {
+	logDir := t.TempDir()
+	writer := newBufferedLogWriter(RollingLogConfig{
+		Dir:           logDir,
+		LogKey:        "test_header",
+		MaxFileSize:   1024,
+		MaxBackups:    10,
+		FlushInterval: time.Hour,
+		BufferSize:    1,
+	})
+	defer writer.Close()
+
+	if _, err := writer.Write([]byte("payload\n")); err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(logDir, "test_header.log"))
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	expected := "--------- New File Log With PID " + strconv.Itoa(os.Getpid()) + " --------"
+	if !strings.Contains(string(data), expected) {
+		t.Fatalf("expected pid header %q, got %s", expected, string(data))
 	}
 }
 
 func TestBufferedLogWriter_DoesNotArchiveOrphanCurrentLogFileOnStart(t *testing.T) {
 	logDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(logDir, "test_orphan_20260911_151929_00019.log"), []byte("archive"), 0666); err != nil {
+	archiveTimestamp := time.Date(2026, 9, 11, 15, 19, 29, 0, time.Local).Unix()
+	if err := os.WriteFile(filepath.Join(logDir, "test_orphan_"+strconv.FormatInt(archiveTimestamp, 10)+"_00019.log"), []byte("archive"), 0666); err != nil {
 		t.Fatalf("write seed archive failed: %v", err)
 	}
-	orphanName := filepath.Join(logDir, "test_orphan_20260911_151952.log")
+	orphanName := filepath.Join(logDir, "test_orphan.log")
 	if err := os.WriteFile(orphanName, []byte("orphan current"), 0666); err != nil {
 		t.Fatalf("write orphan current failed: %v", err)
 	}
@@ -475,17 +546,17 @@ func TestBufferedLogWriter_DoesNotArchiveOrphanCurrentLogFileOnStart(t *testing.
 	if _, err := os.Stat(orphanName); err != nil {
 		t.Fatalf("expected startup to leave orphan current log untouched: %v", err)
 	}
-	archivedName := filepath.Join(logDir, "test_orphan_20260911_151952_00020.log")
+	archivedName := filepath.Join(logDir, "test_orphan_"+strconv.FormatInt(now.Unix(), 10)+"_00020.log")
 	if _, err := os.Stat(archivedName); !os.IsNotExist(err) {
 		t.Fatalf("expected startup not to archive orphan current log, stat err: %v", err)
 	}
-	currentName := filepath.Join(logDir, "test_orphan_20260911_152321.log")
+	currentName := filepath.Join(logDir, "test_orphan.log")
 	if writer.getFileName() != currentName {
 		t.Fatalf("expected new current log file %s, got %s", currentName, writer.getFileName())
 	}
 }
 
-func TestBufferedLogWriter_SequenceResetsPerDayAndUsesFiveDigits(t *testing.T) {
+func TestBufferedLogWriter_ArchiveSequenceIncrementsGloballyAndUsesFiveDigits(t *testing.T) {
 	logDir := t.TempDir()
 	writer := newBufferedLogWriter(RollingLogConfig{
 		Dir:           logDir,
@@ -497,35 +568,27 @@ func TestBufferedLogWriter_SequenceResetsPerDayAndUsesFiveDigits(t *testing.T) {
 	})
 	defer writer.Close()
 
-	firstDay := time.Date(2026, 9, 11, 10, 0, 0, 0, time.Local)
-	if err := writer.rotateLocked(firstDay); err != nil {
-		t.Fatalf("first day first rotate failed: %v", err)
+	now := time.Date(2026, 9, 11, 10, 0, 0, 0, time.Local)
+	if err := writer.rotateLocked(now); err != nil {
+		t.Fatalf("first rotate failed: %v", err)
 	}
-	if err := writer.rotateLocked(firstDay.Add(time.Second)); err != nil {
-		t.Fatalf("first day second rotate failed: %v", err)
+	if err := writer.rotateLocked(now.Add(time.Second)); err != nil {
+		t.Fatalf("second rotate failed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_20260911_100000_00001.log")); err != nil {
+	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_"+strconv.FormatInt(now.Unix(), 10)+"_00001.log")); err != nil {
 		t.Fatalf("expected first archived sequence to use five digits: %v", err)
 	}
-
-	secondDay := firstDay.AddDate(0, 0, 1)
-	if err := writer.rotateLocked(secondDay); err != nil {
-		t.Fatalf("second day rotate failed: %v", err)
+	if err := writer.rotateLocked(now.Add(2 * time.Second)); err != nil {
+		t.Fatalf("third rotate failed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_20260911_100001_00002.log")); err != nil {
-		t.Fatalf("expected same-day sequence to increment: %v", err)
-	}
-	if err := writer.rotateLocked(secondDay.Add(time.Second)); err != nil {
-		t.Fatalf("second day archive rotate failed: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_20260912_100000_00001.log")); err != nil {
-		t.Fatalf("expected next-day sequence to reset: %v", err)
+	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_"+strconv.FormatInt(now.Add(time.Second).Unix(), 10)+"_00002.log")); err != nil {
+		t.Fatalf("expected sequence to increment globally: %v", err)
 	}
 
-	if _, _, ok := writer.parseRollingLogFile("test_sequence_20260911_100000_001.log"); ok {
+	if _, _, ok := writer.parseRollingLogFile("test_sequence_" + strconv.FormatInt(now.Unix(), 10) + "_001.log"); ok {
 		t.Fatal("expected three-digit sequence log filename to be invalid")
 	}
-	if _, _, ok := writer.parseRollingLogFile("test_sequence_20260911_100000_00001.log"); !ok {
+	if _, _, ok := writer.parseRollingLogFile("test_sequence_" + strconv.FormatInt(now.Unix(), 10) + "_00001.log"); !ok {
 		t.Fatal("expected five-digit sequence log filename to be valid")
 	}
 }
@@ -543,7 +606,7 @@ func TestBufferedLogWriter_SequenceWrapsAfterFiveDigitLimit(t *testing.T) {
 	defer writer.Close()
 
 	now := time.Date(2026, 9, 11, 10, 0, 0, 0, time.Local)
-	if err := os.WriteFile(filepath.Join(logDir, "test_sequence_wrap_20260911_095959_99998.log"), []byte("old"), 0666); err != nil {
+	if err := os.WriteFile(filepath.Join(logDir, "test_sequence_wrap_"+strconv.FormatInt(now.Unix(), 10)+"_99998.log"), []byte("old"), 0666); err != nil {
 		t.Fatalf("write seed archive failed: %v", err)
 	}
 	if err := writer.rotateLocked(now); err != nil {
@@ -552,14 +615,14 @@ func TestBufferedLogWriter_SequenceWrapsAfterFiveDigitLimit(t *testing.T) {
 	if err := writer.rotateLocked(now.Add(time.Second)); err != nil {
 		t.Fatalf("rotate to max sequence failed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_wrap_20260911_100000_99999.log")); err != nil {
+	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_wrap_"+strconv.FormatInt(now.Unix(), 10)+"_99999.log")); err != nil {
 		t.Fatalf("expected sequence to reach five-digit limit: %v", err)
 	}
 
 	if err := writer.rotateLocked(now.Add(2 * time.Second)); err != nil {
 		t.Fatalf("rotate after max sequence failed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_wrap_20260911_100001_00001.log")); err != nil {
+	if _, err := os.Stat(filepath.Join(logDir, "test_sequence_wrap_"+strconv.FormatInt(now.Add(time.Second).Unix(), 10)+"_00001.log")); err != nil {
 		t.Fatalf("expected sequence to wrap to 00001: %v", err)
 	}
 }
@@ -603,8 +666,8 @@ func TestBufferedLogWriter_RecreatesRemovedCurrentLogFile(t *testing.T) {
 	writer.mu.Lock()
 	currentSize := writer.currentSize
 	writer.mu.Unlock()
-	if currentSize != int64(len(second)) {
-		t.Fatalf("expected currentSize to reset to %d, got %d", len(second), currentSize)
+	if currentSize < int64(len(second)) {
+		t.Fatalf("expected currentSize to include header and second write, got %d", currentSize)
 	}
 }
 
@@ -615,21 +678,36 @@ func TestCloseOutput_FlushesBufferedLogs(t *testing.T) {
 	Infof("buffered close flush")
 	CloseOutput()
 
-	matches, err := filepath.Glob(filepath.Join(logDir, "test_close_flush_*.log"))
-	if err != nil {
-		t.Fatalf("Glob failed: %v", err)
-	}
-	if len(matches) != 1 {
-		t.Fatalf("Expected one flushed archive log file, got %d: %+v", len(matches), matches)
-	}
-	if _, _, ok := getBufferedLogWriter().parseRollingLogFile(filepath.Base(matches[0])); !ok {
-		t.Fatalf("Expected CloseOutput to archive current log file, got %s", matches[0])
-	}
-	data, err := os.ReadFile(matches[0])
+	data, err := os.ReadFile(filepath.Join(logDir, "test_close_flush.log"))
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
 	}
 	if !strings.Contains(string(data), "buffered close flush") {
 		t.Fatalf("Expected CloseOutput to flush buffered log, got: %s", string(data))
+	}
+	if strings.Contains(string(data), "close log writer") {
+		t.Fatalf("Expected CloseOutput not to write close marker, got: %s", string(data))
+	}
+	expectedEnd := "--------- End File Log With PID " + strconv.Itoa(os.Getpid()) + " --------"
+	if !strings.Contains(string(data), expectedEnd) {
+		t.Fatalf("Expected CloseOutput to write end marker %q, got: %s", expectedEnd, string(data))
+	}
+	matches, err := filepath.Glob(filepath.Join(logDir, "test_close_flush_*.log"))
+	if err != nil {
+		t.Fatalf("Glob failed: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("Expected CloseOutput not to archive current log file, got %+v", matches)
+	}
+}
+
+func TestCloseOutput_DoesNotCreateLogFileWhenNoBufferedLogs(t *testing.T) {
+	logDir := t.TempDir()
+	setOutput("test_close_empty", logDir)
+	ForceFlush(false)
+	CloseOutput()
+
+	if _, err := os.Stat(filepath.Join(logDir, "test_close_empty.log")); !os.IsNotExist(err) {
+		t.Fatalf("Expected CloseOutput without buffered logs not to create current log file, stat err: %v", err)
 	}
 }

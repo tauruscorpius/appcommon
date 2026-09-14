@@ -29,6 +29,7 @@ type RollingLogConfig struct {
 	LogKey        string
 	MaxFileSize   int64
 	MaxBackups    int
+	MaxAge        int
 	FlushInterval time.Duration
 	BufferSize    int
 }
@@ -123,6 +124,9 @@ func withRollingLogConfigDefaults(cfg RollingLogConfig) RollingLogConfig {
 	if cfg.MaxBackups < 0 {
 		cfg.MaxBackups = 0
 	}
+	if cfg.MaxAge < 0 {
+		cfg.MaxAge = 0
+	}
 	if cfg.FlushInterval <= 0 {
 		cfg.FlushInterval = defaultFlushInterval
 	}
@@ -164,10 +168,10 @@ func (b *BufferedLogWriter) Close() {
 	if err := b.flushLocked(); err != nil {
 		fmt.Printf("flush log on close error : %v\n", err)
 	}
-	if err := b.archiveCurrentLogFileLocked(); err != nil {
-		fmt.Printf("archive log on close error : %v\n", err)
+	if err := b.writeEndLogLocked(); err != nil {
+		fmt.Printf("write end log error : %v\n", err)
 	}
-	b.cleanBackupsLocked()
+	b.closeFileLocked()
 	b.closed = true
 	b.closeDone()
 }
@@ -190,13 +194,12 @@ func (b *BufferedLogWriter) CheckLogFileRotation() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	today := time.Now().Format(Consts.DateDF)
-	if b.fileHandle != nil && b.activeDate == today {
+	if b.fileHandle != nil && !b.currentLogFileRemovedLocked() {
 		return ""
 	}
 	prev := b.fileName
-	if err := b.rotateLocked(time.Now()); err != nil {
-		fmt.Printf("rotate log file error : %v\n", err)
+	if err := b.openCurrentLogFileLocked(time.Now()); err != nil {
+		fmt.Printf("open log file error : %v\n", err)
 		return prev
 	}
 	return prev
@@ -271,10 +274,11 @@ func (b *BufferedLogWriter) writeFileLocked(s []byte) error {
 }
 
 func (b *BufferedLogWriter) ensureLogFileLocked(nextWriteBytes int) error {
-	now := time.Now()
-	today := now.Format(Consts.DateDF)
-	if b.fileHandle == nil || b.activeDate != today || b.currentLogFileRemovedLocked() || b.currentSize+int64(nextWriteBytes) > b.cfg.MaxFileSize {
-		return b.rotateLocked(now)
+	if b.fileHandle == nil || b.currentLogFileRemovedLocked() {
+		return b.openCurrentLogFileLocked(time.Now())
+	}
+	if b.currentSize+int64(nextWriteBytes) > b.cfg.MaxFileSize {
+		return b.rotateLocked(time.Now())
 	}
 	return nil
 }
@@ -304,24 +308,33 @@ func (b *BufferedLogWriter) rotateLocked(now time.Time) error {
 		return err
 	}
 
-	fileName := b.currentLogFileName(now)
+	if err := b.openCurrentLogFileLocked(now); err != nil {
+		return err
+	}
+	b.cleanBackupsLocked()
+	return nil
+}
+
+func (b *BufferedLogWriter) openCurrentLogFileLocked(now time.Time) error {
+	if err := os.MkdirAll(b.cfg.Dir, 0777); err != nil {
+		return err
+	}
+	fileName := b.currentLogFileName()
 	if err := b.createLogFileLocked(fileName); err != nil {
 		return err
 	}
 	b.fileName = fileName
 	b.activeDate = now.Format(Consts.DateDF)
 	b.activeSince = now
-	b.currentSize = 0
-	b.cleanBackupsLocked()
 	return nil
 }
 
-func (b *BufferedLogWriter) currentLogFileName(now time.Time) string {
-	return filepath.Join(b.cfg.Dir, fmt.Sprintf("%s_%s_%s.log", b.cfg.LogKey, now.Format(Consts.DateDF), now.Format("150405")))
+func (b *BufferedLogWriter) currentLogFileName() string {
+	return filepath.Join(b.cfg.Dir, b.cfg.LogKey+".log")
 }
 
 func (b *BufferedLogWriter) buildArchiveLogFileName(now time.Time, sequence uint64) string {
-	return fmt.Sprintf("%s_%s_%s_%05d.log", b.cfg.LogKey, now.Format(Consts.DateDF), now.Format("150405"), sequence)
+	return fmt.Sprintf("%s_%d_%05d.log", b.cfg.LogKey, now.Unix(), sequence)
 }
 
 func (b *BufferedLogWriter) archiveCurrentLogFileLocked() error {
@@ -341,8 +354,7 @@ func (b *BufferedLogWriter) archiveCurrentLogFileLocked() error {
 		return err
 	}
 
-	archiveDate := archiveTime.Format(Consts.DateDF)
-	sequence := b.nextSequenceForDateLocked(archiveDate)
+	sequence := b.nextSequenceLocked()
 	b.sequence = sequence
 	archiveName := b.buildArchiveLogFileName(archiveTime, sequence)
 	return os.Rename(b.fileName, filepath.Join(b.cfg.Dir, archiveName))
@@ -355,6 +367,12 @@ func (b *BufferedLogWriter) createLogFileLocked(fileName string) error {
 	}
 	b.closeFileLocked()
 	b.fileHandle = fh
+	if _, err := b.fileHandle.WriteString(fmt.Sprintf("--------- New File Log With PID %d --------\n", os.Getpid())); err != nil {
+		return err
+	}
+	if st, err := b.fileHandle.Stat(); err == nil {
+		b.currentSize = st.Size()
+	}
 	return nil
 }
 
@@ -389,14 +407,13 @@ func (b *BufferedLogWriter) autoFlush() {
 			b.flush()
 		case <-b.chanClose:
 			b.mu.Lock()
-			_, _ = b.buffer.WriteString("close log writer\n")
 			if err := b.flushLocked(); err != nil {
 				fmt.Printf("flush log on close error : %v\n", err)
 			}
-			if err := b.archiveCurrentLogFileLocked(); err != nil {
-				fmt.Printf("archive log on close error : %v\n", err)
+			if err := b.writeEndLogLocked(); err != nil {
+				fmt.Printf("write end log error : %v\n", err)
 			}
-			b.cleanBackupsLocked()
+			b.closeFileLocked()
 			b.closed = true
 			b.mu.Unlock()
 			return
@@ -408,6 +425,15 @@ func (b *BufferedLogWriter) closeDone() {
 	b.doneOnce.Do(func() {
 		close(b.chanDone)
 	})
+}
+
+func (b *BufferedLogWriter) writeEndLogLocked() error {
+	if b.fileHandle == nil {
+		return nil
+	}
+	n, err := b.fileHandle.WriteString(fmt.Sprintf("--------- End File Log With PID %d --------\n", os.Getpid()))
+	b.currentSize += int64(n)
+	return err
 }
 
 func (b *BufferedLogWriter) getFileName() string {
@@ -491,30 +517,43 @@ func (b *BufferedLogWriter) logFilesLocked() []os.FileInfo {
 }
 
 func (b *BufferedLogWriter) cleanBackupsLocked() {
+	files := b.logFilesLocked()
+	if b.cfg.MaxAge > 0 {
+		expireBefore := time.Now().AddDate(0, 0, -b.cfg.MaxAge).Unix()
+		var keptFiles []os.FileInfo
+		for _, file := range files {
+			createdAt, _, ok := b.parseRollingLogFile(file.Name())
+			if ok && createdAt < expireBefore {
+				_ = os.Remove(filepath.Join(b.cfg.Dir, file.Name()))
+				continue
+			}
+			keptFiles = append(keptFiles, file)
+		}
+		files = keptFiles
+	}
 	if b.cfg.MaxBackups <= 0 {
 		return
 	}
-	files := b.logFilesLocked()
 	for len(files) > b.cfg.MaxBackups {
 		_ = os.Remove(filepath.Join(b.cfg.Dir, files[0].Name()))
 		files = files[1:]
 	}
 }
 
-func (b *BufferedLogWriter) maxSequenceForDateLocked(date string) uint64 {
+func (b *BufferedLogWriter) maxSequenceLocked() uint64 {
 	files := b.logFilesLocked()
 	var maxSeq uint64
 	for _, file := range files {
-		parsedDate, seq, ok := b.parseRollingLogFile(file.Name())
-		if ok && parsedDate == date && seq > maxSeq {
+		_, seq, ok := b.parseRollingLogFile(file.Name())
+		if ok && seq > maxSeq {
 			maxSeq = seq
 		}
 	}
 	return maxSeq
 }
 
-func (b *BufferedLogWriter) nextSequenceForDateLocked(date string) uint64 {
-	sequence := b.maxSequenceForDateLocked(date)
+func (b *BufferedLogWriter) nextSequenceLocked() uint64 {
+	sequence := b.maxSequenceLocked()
 	if sequence >= maxRollingLogSequence {
 		return 1
 	}
@@ -526,24 +565,25 @@ func (b *BufferedLogWriter) isRollingLogFile(fileName string) bool {
 	return ok
 }
 
-func (b *BufferedLogWriter) parseRollingLogFile(fileName string) (string, uint64, bool) {
+func (b *BufferedLogWriter) parseRollingLogFile(fileName string) (int64, uint64, bool) {
 	prefix := b.cfg.LogKey + "_"
 	if !strings.HasPrefix(fileName, prefix) || !strings.HasSuffix(fileName, ".log") {
-		return "", 0, false
+		return 0, 0, false
 	}
 	body := strings.TrimSuffix(strings.TrimPrefix(fileName, prefix), ".log")
 	parts := strings.Split(body, "_")
-	if len(parts) != 3 || len(parts[0]) != 8 || len(parts[1]) != 6 || len(parts[2]) != 5 {
-		return "", 0, false
+	if len(parts) != 2 || len(parts[0]) == 0 || len(parts[1]) != 5 {
+		return 0, 0, false
 	}
-	if _, err := time.Parse("20060102_150405", parts[0]+"_"+parts[1]); err != nil {
-		return "", 0, false
+	timestamp, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || timestamp <= 0 {
+		return 0, 0, false
 	}
-	seq, err := strconv.ParseUint(parts[2], 10, 64)
+	seq, err := strconv.ParseUint(parts[1], 10, 64)
 	if err != nil {
-		return "", 0, false
+		return 0, 0, false
 	}
-	return parts[0], seq, true
+	return timestamp, seq, true
 }
 
 func getLogFileCreateDate(file string) string {
